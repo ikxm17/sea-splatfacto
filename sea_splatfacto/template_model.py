@@ -9,7 +9,6 @@ from typing import Type
 from nerfstudio.models.nerfacto import NerfactoModel, NerfactoModelConfig  # for subclassing Nerfacto model
 from nerfstudio.models.base_model import Model, ModelConfig  # for custom Model
 
-
 @dataclass
 class TemplateModelConfig(NerfactoModelConfig):
     """Template Model Configuration.
