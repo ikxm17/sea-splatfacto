@@ -238,3 +238,26 @@ class SeaSplatfactoModel(SplatfactoModel):
         self.adjust_gs_colors_for_cc = False
         self.update_gs_color_counter = 0
 
+    def get_param_groups(self) -> Dict[str, List[Parameter]]:
+        """_summary_
+
+        Returns:
+            Dict[str, List[Parameter]]: _description_
+        """
+        # Get base parameter groups
+        gps = super().get_param_groups()
+
+        # Add learned background parameters
+        if self.config.learn_background and self.learned_bg is not None:
+            gps["learned_bg"] = list(self.learned_bg) # type: ignore
+
+        # add underwater model parameters
+        if (
+            self.config.do_seathru
+            and self.backscatter_model is not None
+            and self.attenuation_model is not None
+        ):
+            gps["backscatter_model"] = list(self.backscatter_model.parameters())
+            gps["attenuation_model"] = list(self.attenuation_model.parameters())
+
+        return gps
