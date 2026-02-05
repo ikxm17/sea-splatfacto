@@ -4,7 +4,7 @@ Template Model File
 Currently this subclasses the Nerfacto model. Consider subclassing from the base Model.
 """
 from dataclasses import dataclass, field
-from typing import Type
+from typing import Dict, List, Literal, Optional, Tuple, Type, Union
 
 from nerfstudio.models.nerfacto import NerfactoModel, NerfactoModelConfig  # for subclassing Nerfacto model
 from nerfstudio.models.base_model import Model, ModelConfig  # for custom Model
