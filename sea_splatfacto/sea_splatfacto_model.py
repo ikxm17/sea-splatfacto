@@ -261,3 +261,85 @@ class SeaSplatfactoModel(SplatfactoModel):
             gps["attenuation_model"] = list(self.attenuation_model.parameters())
 
         return gps
+
+    def get_outputs(self, camera: Cameras) -> Dict[str, Union[torch.Tensor, List]]:
+        """_summary_
+
+        Args:
+            camera (Cameras): _description_
+
+        Returns:
+            Dict[str, Union[torch.Tensor, List]]: _description_
+        """
+        # get base outputs (includes rgb, depth, accumulation, background)
+        outputs = super().get_outputs(camera)
+
+        if not isinstance(camera, Cameras):
+            print("Called get_outputs with not a Cameras instance")
+            return {}
+        
+        # [H, W, 3]
+        raw_rgb = outputs["rgb"].clone() # type: ignore
+        # [H, W, 1]
+        alpha_image = outputs["alpha"].clone() # type: ignore
+        
+        # TODO: should assign a more meaningful name than "image"
+        if self.config.learn_background:
+            if self.config.bg_from_backscatter and self.config.do_seathru and self.step > self.config.seathru_from_iter:
+                image = raw_rgb
+                if not self.done_binf_init_with_bg:
+                    print(f"{self.step}: Updated backscatter model's B_inf with learned background parameters")
+                    self.backscatter_model.B_inf = torch.nn.Parameter(torch.clone(self.learned_bg.data).reshape(3, 1, 1).to(self.device)) # type: ignore
+            else:
+                bg_image = torch.sigmoid(self.learned_bg).reshape(3, 1, 1) * (1 - alpha_image) # type: ignore
+                bg_detached_image = torch.sigmoid(self.learned_bg).reshape(3, 1, 1) * (1 - alpha_image) # type: ignore
+                image = raw_rgb + bg_image
+        else:
+            image = raw_rgb
+        
+        # [H, W, 1] or None
+        depth_image = outputs["depth"].clone() # type: ignore
+        # ? What is going on here?
+        if self.config.filter_depth:
+            depth_image = depth_image = depth_image / alpha_image
+            if torch.any(torch.isnan(torch.logical_or(torch.isnan(depth_image), torch.isinf(depth_image)))):
+                valid_depth_vals = depth_image[torch.logical_not(torch.logical_or(torch.isnan(depth_image), torch.isinf(depth_image)))]
+                if len(valid_depth_vals) == 0:
+                    print(f"[Training] everything is NaN)")
+                else:
+                    not_nan_max = torch.max(valid_depth_vals).item()
+                depth_image = torch.nan_to_num(depth_image, not_nan_max, not_nan_max)
+            depth_image = depth_image / self.config.normalize_depth
+            if self.config.norm_depth_max:
+                if depth_image.min() != depth_image.max():
+                    depth_image = (depth_image - depth_image.min()) / (depth_image.max() - depth_image.min())
+                else:
+                    depth_image = depth_image / depth_image.max()
+        
+        # TODO: if ground truth depth image is available, replace `depth_image` with it here   
+        outputs["processed_depth"] = depth_image          
+        
+        if self.config.do_seathru and self.step > self.config.seathru_from_iter:
+            # reshape from nerfstudio tensor format [H, W, C] to PyTorch tensor format [1, C, H, W]
+            image_batch = image.permute(2, 0, 1).unsqueeze(0) # [1, 3, H, W]
+            depth_image_batch = depth_image.permute(2, 0, 1).unsqueeze(0) # [1, 1, H, W]
+            
+            # estimate attenuation
+            if self.config.disable_attenuation:
+                direct_image = image_batch
+            else:
+                attenuation = self.attenuation_model(depth_image_batch) # type: ignore
+                direct_image = image_batch * attenuation
+            outputs["attenuation"] = attenuation.squeeze(0).permute(1, 2, 0) # convert to nerfstudio tensor format [H, W, 3]
+            outputs["direct_image"] = direct_image.squeeze(0).permute(1, 2, 0) # convert to nerfstudio tensor format [H, W, 3]
+            
+            # TODO: add z-score
+            
+            # estimate backscatter
+            backscatter = self.backscatter_model(depth_image_batch) # type: ignore
+            outputs["backscatter"] = backscatter.squeeze(0).permute(1, 2, 0) # convert to nerfstudio tensor format [H, W, 3]
+            
+            # underwater image formation
+            underwater_image = torch.clamp(direct_image + backscatter, 0.0, 1.0)
+            outputs["underwater_image"] = underwater_image.squeeze(0).permute(1, 2, 0) # convert to nerfstudio tensor format [H, W, 3]
+        return outputs
