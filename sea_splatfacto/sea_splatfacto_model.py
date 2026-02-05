@@ -63,19 +63,21 @@ from utils.general_utils import inverse_sigmoid
 from utils.loss_utils import depth_weighted_l1_loss, depth_weighted_l2_loss
 
 @dataclass
-class TemplateModelConfig(NerfactoModelConfig):
+class SeaSplatfactoModelConfig(SplatfactoModelConfig):
     """Template Model Configuration.
 
     Add your custom model config parameters here.
     """
 
-    _target: Type = field(default_factory=lambda: TemplateModel)
+    _target: Type = field(default_factory=lambda: SplatfactoModel)
+class SeaSplatfactoModel(SplatfactoModel):
+    """_summary_
 
+    Args:
+        SplatfactoModel (_type_): _description_
+    """
 
-class TemplateModel(NerfactoModel):
-    """Template Model."""
-
-    config: TemplateModelConfig
+    config: SeaSplatfactoModelConfig
 
     def populate_modules(self):
         super().populate_modules()
