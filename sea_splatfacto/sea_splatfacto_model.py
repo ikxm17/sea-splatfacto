@@ -343,3 +343,140 @@ class SeaSplatfactoModel(SplatfactoModel):
             underwater_image = torch.clamp(direct_image + backscatter, 0.0, 1.0)
             outputs["underwater_image"] = underwater_image.squeeze(0).permute(1, 2, 0) # convert to nerfstudio tensor format [H, W, 3]
         return outputs
+        
+    def get_loss_dict(
+        self, outputs, batch, metrics_dict=None
+    ) -> Dict[str, torch.Tensor]:
+        """_summary_
+
+        Args:
+            outputs (_type_): _description_
+            batch (_type_): _description_
+            metrics_dict (_type_, optional): _description_. Defaults to None.
+
+        Returns:
+            Dict[str, torch.Tensor]: _description_
+        """
+        loss_dict = dict()
+        
+        # get ground truth image
+        gt_image = self.composite_with_background(
+            self.get_gt_image(batch["image"]), outputs["background"]
+        )
+        
+        # get predicted image
+        if self.config.do_seathru and self.step > self.config.seathru_from_iter:
+            pred_image = outputs["underwater_image"]
+        else:
+            pred_image = outputs.get("image", outputs["rgb"]) 
+        
+        # get depth image
+        depth_image = outputs["depth"]
+        
+        if self.config.use_depth_weighted_l1:
+            Ll1 = depth_weighted_l1_loss(pred_image, gt_image, depth_image.detach())
+        elif self.config.use_depth_weighted_l2:
+            Ll1 = depth_weighted_l2_loss(pred_image, gt_image, depth_image.detach())
+        else:
+            Ll1 = torch.abs(gt_image - pred_image).mean()
+            
+        simloss = 1 - self.ssim(gt_image.permute(2, 0, 1)[None, ...], pred_image.permute(2, 0, 1)[None, ...])
+        
+        # main loss implemented by splatfacto
+        main_loss = (1 - self.config.ssim_lambda) * Ll1 + self.config.ssim_lambda * simloss # main_loss from SplatfactoModel's implementation
+        loss_dict["main_loss"] = main_loss
+        
+        # depth weighted l1
+        if self.config.add_recon_depth_l1 and "processed_depth" in outputs:
+            dl1 = depth_weighted_l1_loss(pred_image, gt_image, depth_image.detach())
+            depth_weighted_l1 = self.config.dwr_lambda * dl1
+            loss_dict["depth_weighted_l1_loss"] = depth_weighted_l1
+        
+        # binary accumulation loss
+        if self.config.use_opacity_prior:
+            opacity_prior_loss = mixture_of_laplacians_loss(self.get_gaussian_param_groups()["opacities"]) # TODO: check whether this corresponds to scene.gaussians.get_opacity
+            loss_dict["opacity_prior_loss"] = self.config.opacity_prior_lambda * opacity_prior_loss        
+        
+        # TODO: add the other losses for alpha_bg_loss
+        # alpha background loss
+        if self.config.learn_background:
+            rendered_image = outputs["rgb"]
+            underwater_image = outputs["underwater_image"]
+            alpha_image = outputs["alpha"]
+            alpha_bg_loss = self.alpha_bg_criterion(rendered_image.detach(), torch.sigmoid(self.learned_bg.detach()), alpha_image) # type: ignore
+            if self.config.do_seathru and self.step > self.config.seathru_from_iter:
+                if self.config.alpha_binf_uw:
+                    alpha_bg_loss = self.alpha_bg_criterion(underwater_image.squeeze().detach(), torch.sigmoid(self.backscatter_model.B_inf).squeeze().detach(), alpha_image) # type: ignore
+            loss_dict["alpha_bg_loss"] = self.config.bg_lambda * alpha_bg_loss
+        
+        # depth smooth loss
+        if self.config.use_depth_smooth_loss:
+            gt_image_batch = gt_image.permute(2, 0, 1).unsqueeze(0)
+            depth_image_batch = outputs["processed_depth"].permute(2, 0, 1).unsqueeze(0)
+            depth_smooth_loss = self.depth_smooth_critetion(gt_image_batch, depth_image_batch)
+            loss_dict["depth_smooth_loss"] = self.config.depth_smooth_lambda * depth_smooth_loss
+        
+        # gray world loss  
+        if self.config.use_gw_loss and self.step > self.config.gw_from_iter:
+            image_batch = outputs["image"].permute(2, 0, 1).unsqueeze(0)
+            gw_loss = self.gw_criterion(image_batch)
+            loss_dict["gray_world_loss"] = self.config.gw_loss_lambda * gw_loss
+        
+        # dark channel prior loss
+        if self.config.use_dcp_loss:
+            gt_image_batch = gt_image.permute(2, 0, 1).unsqueeze(0)
+            depth_image_batch = outputs["processed_depth"].permute(2, 0, 1).unsqueeze(0)
+            if self.config.do_seathru and self.step > self.config.seathru_from_iter:
+                backscatter_depth_detached = self.backscatter_model(depth_image_batch.detach()) # type: ignore
+                direct_reversed = gt_image_batch.detach() - backscatter_depth_detached # direct reverse from ground truth through backscatter model
+                dcp_loss, _ = self.dcp_criterion(direct_reversed, depth_image_batch.detach())
+            else:
+                dcp_loss, _ = self.dcp_criterion(gt_image_batch.detach(), depth_image_batch.detach())
+            loss_dict["dark_channel_prior_loss"] = self.config.dcp_loss_lambda * dcp_loss
+                
+        
+        # losses that only apply when seathru
+        if self.config.do_seathru and self.step > self.config.seathru_from_iter:
+            # TODO: rgb spatial variation loss
+            # rgb saturation loss
+            if self.config.use_rgb_sat_loss:
+                image_batch = outputs["image"].permute(2, 0, 1).unsqueeze(0)
+                rgb_sat_loss = self.rgb_sat_criterion(image_batch)
+                loss_dict["rgb_saturation_loss"] = self.config.sat_loss_lambda * rgb_sat_loss
+            # TODO: B_inf loss
+            # dsc attenuation loss
+            if self.config.use_dsc_attenuation_loss:
+                gt_image_batch = gt_image.permute(2, 0, 1).unsqueeze(0)
+                depth_image_batch = outputs["processed_depth"].permute(2, 0, 1).unsqueeze(0)
+                attenuation = outputs["attenuation"].permute(2, 0, 1).unsqueeze(0)
+                attenuation_depth_detached = attenuation_model(depth_image_batch.detach()) # type: ignore
+                direct_reversed = (gt_image_batch - outputs["backscatter"].permute(2, 0, 1).unsqueeze(0))
+                if self.config.disable_attenuation:
+                    J_through_attenuation = torch.zeros_like(direct_reversed)
+                else:
+                    J_through_attenuation = direct_reversed / attenuation_depth_detached
+                dsc_attenuation_loss = self.dsc_attenuation_criterion(direct_reversed, J_through_attenuation)
+                loss_dict["dsc_attenuation_loss"] = self.config.dsc_attenuation_lambda * dsc_attenuation_loss
+        
+        # from parent: scale regulaization
+        if self.config.use_scale_regularization and self.step % 10 == 0:
+            scale_exp = torch.exp(self.scales)
+            scale_reg = (
+                torch.maximum(
+                    scale_exp.amax(dim=-1) / scale_exp.amin(dim=-1),
+                    torch.tensor(self.config.max_gauss_ratio),
+                )
+                - self.config.max_gauss_ratio
+            )
+            loss_dict["scale_reg"] = 0.1 * scale_reg.mean()
+        else:
+            loss_dict["scale_reg"] = torch.tensor(0.0, device=self.device)
+            
+        # from parent: add camera optimizer loss if training
+        if self.training:
+            self.camera_optimizer.get_loss_dict(loss_dict)
+            if self.config.use_bilateral_grid:
+                loss_dict["tv_loss"] = 10 * total_variation_loss(self.bil_grids.grids)
+        
+        return loss_dict
+        
