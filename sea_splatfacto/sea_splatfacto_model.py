@@ -188,3 +188,53 @@ class SeaSplatfactoModel(SplatfactoModel):
 
     # TODO: Override any potential functions/methods to implement your own method
     # or subclass from "Model" and define all mandatory fields.
+
+        # === Initialize Underwater Models (train.py lines 63-72) ===
+        if self.config.do_seathru:
+            # BackscatterNetV2 initialization (train.py line 64)
+            self.backscatter_model = BackscatterNetV2(
+                use_residual=self.config.use_backscatter_residual,
+                scale=self.config.backscatter_scale,
+                do_sigmoid=self.config.backscatter_do_sigmoid,
+            ).to(self.device)
+            # AttenuateNetV3 initialization (train.py lines 65-70)
+            self.attenuation_model = AttenuateNetV3(
+                scale=self.config.attenuation_scale,
+                do_sigmoid=self.config.attenuation_do_sigmoid,
+                init_vals=not self.config.attenuation_do_sigmoid,
+            )
+        else:
+            self.backscatter_model = None
+            self.attenuation_model = None
+
+        # === Initialize Loss Criteria (train.py lines 74-84) ===
+        self.depth_smooth_critetion = SmoothDepthLoss().to(self.device)
+        self.gw_criterion = GrayWorldPriorLoss().to(self.device)
+        self.rgb_sv_criterion = RGBSpatialVariationLoss().to(self.device)
+        self.rgb_01_criterion = RGBSaturationLoss(saturation_limit=1.0).to(self.device)
+        self.rgb_sat_criterion = RGBSaturationLoss(saturation_limit=0.7).to(self.device)
+        self.alpha_bg_criterion = AlphaBackgroundLoss(use_kornia=False).to(self.device)
+        self.dsc_attenuation_criterion = AttenuateLoss().to(self.device)
+        self.dcp_criterion = DarkChannelPriorLossV3().to(self.device)
+
+        # === To learn the background ===
+        if self.config.learn_background:
+            bg_init = self.rand(3, device=self.device)
+            bg_init[2] = 0.8
+            bg_init[1] = 0.24
+            bg_init[0] = 0.05
+            self.learned_bg = torch.nn.Parameter(
+                inverse_sigmoid(bg_init.requires_grad_(True))
+            )
+        else:
+            self.learned_bg = None
+
+        # === State variables for training ===
+        self.backscatter_inited = False
+        self.attenuation_inited = False
+        self.backscatter_update_counter = 0
+        self.attenuation_update_counter = 0
+        self.done_binf_init_with_bg = False
+        self.adjust_gs_colors_for_cc = False
+        self.update_gs_color_counter = 0
+
