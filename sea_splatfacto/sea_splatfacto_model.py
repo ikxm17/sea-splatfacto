@@ -417,7 +417,33 @@ class SeaSplatfactoModel(SplatfactoModel):
             outputs["attenuation_depth_detached"] = self._to_hwc(attenuation_map_detach_bchw)
 
         return outputs
-        
+
+    def get_metrics_dict(self, outputs, batch) -> Dict[str, torch.Tensor]:
+        # Use underwater image for PSNR when seathru is active
+        modified_outputs = dict(outputs)
+        if "underwater_rgb" in outputs:
+            modified_outputs["rgb"] = outputs["underwater_rgb"]
+        else:
+            modified_outputs["rgb"] = outputs["image"]
+
+        metrics_dict = super().get_metrics_dict(modified_outputs, batch)
+
+        # Log medium model parameters
+        # Source: train.py lines 636-668
+        if self.config.learn_background:
+            bg_rgb = torch.sigmoid(self.learned_bg)
+            metrics_dict["bg_r"] = bg_rgb[0]
+            metrics_dict["bg_g"] = bg_rgb[1]
+            metrics_dict["bg_b"] = bg_rgb[2]
+
+        if self.backscatter_model is not None and self.seathru_active:
+            binf = torch.sigmoid(self.backscatter_model.B_inf.detach()).squeeze()
+            metrics_dict["binf_r"] = binf[0]
+            metrics_dict["binf_g"] = binf[1]
+            metrics_dict["binf_b"] = binf[2]
+
+        return metrics_dict
+
     def get_loss_dict(
         self, outputs, batch, metrics_dict=None
     ) -> Dict[str, torch.Tensor]:
@@ -602,6 +628,84 @@ class SeaSplatfactoModel(SplatfactoModel):
             pass
         
         return loss_dict
+    
+    def get_image_metrics_and_images(
+            self, outputs: Dict[str, torch.Tensor], batch: Dict[str, torch.Tensor]
+        ) -> Tuple[Dict[str, float], Dict[str, torch.Tensor]]:
+        """_summary_
+
+        Args:
+            outputs (Dict[str, torch.Tensor]): _description_
+            batch (Dict[str, torch.Tensor]): _description_
+
+        Returns:
+            Tuple[Dict[str, float], Dict[str, torch.Tensor]]: _description_
+        """
+        gt_rgb = self.composite_with_background(
+            self.get_gt_img(batch["image"]), outputs["background"]
+        )  # [H,W,3]
+
+        # Select the predicted image -- underwater if available, else clean
+        if "underwater_rgb" in outputs:
+            pred_rgb = outputs["underwater_rgb"]
+        else:
+            pred_rgb = outputs["image"]
+
+        # Clamp for safety
+        pred_rgb = torch.clamp(pred_rgb, 0.0, 1.0)
+        gt_rgb = torch.clamp(gt_rgb, 0.0, 1.0)
+
+        combined_rgb = torch.cat([gt_rgb, pred_rgb], dim=1)
+
+        # Metrics: PSNR, SSIM, LPIPS -- in [1,C,H,W] format
+        gt_1chw = torch.moveaxis(gt_rgb, -1, 0)[None, ...]
+        pred_1chw = torch.moveaxis(pred_rgb, -1, 0)[None, ...]
+
+        metrics_dict = {
+            "psnr": float(self.psnr(gt_1chw, pred_1chw).item()),
+            "ssim": float(self.ssim(gt_1chw, pred_1chw)),
+            "lpips": float(self.lpips(gt_1chw, pred_1chw)),
+        }
+
+        # Also compute metrics on the clean (in-air) restored image
+        if "image" in outputs and "underwater_rgb" in outputs:
+            clean = torch.clamp(outputs["image"], 0.0, 1.0)
+            clean_1chw = torch.moveaxis(clean, -1, 0)[None, ...]
+            metrics_dict["clean_psnr"] = float(self.psnr(gt_1chw, clean_1chw).item())
+
+        images_dict: Dict[str, torch.Tensor] = {"img": combined_rgb}
+
+        # Depth visualization
+        depth = outputs.get("depth_processed")
+        if depth is not None:
+            d_vis = depth / depth.max().clamp(min=1e-8)
+            images_dict["depth"] = d_vis.repeat(1, 1, 3)  # grayscale -> RGB
+
+        # Alpha visualization
+        alpha = outputs.get("accumulation")
+        if alpha is not None:
+            images_dict["alpha"] = alpha.repeat(1, 1, 3)
+
+        # Underwater-specific visualizations
+        if "backscatter" in outputs:
+            images_dict["backscatter"] = torch.clamp(outputs["backscatter"], 0.0, 1.0)
+        if "attenuation_map" in outputs:
+            images_dict["attenuation_map"] = torch.clamp(
+                outputs["attenuation_map"], 0.0, 1.0
+            )
+        if "direct" in outputs:
+            images_dict["direct"] = torch.clamp(outputs["direct"], 0.0, 1.0)
+        if "underwater_rgb" in outputs:
+            images_dict["underwater"] = torch.clamp(
+                outputs["underwater_rgb"], 0.0, 1.0
+            )
+        if "rendered_image" in outputs:
+            images_dict["clean_render"] = torch.clamp(
+                outputs["rendered_image"], 0.0, 1.0
+            )
+
+        return metrics_dict, images_dict
+    
     # Helpers
     @staticmethod
     def _to_bchw(hwc: torch.Tensor) -> torch.Tensor:
