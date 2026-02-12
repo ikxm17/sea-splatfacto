@@ -538,4 +538,78 @@ class SeaSplatfactoModel(SplatfactoModel):
                 loss_dict["tv_loss"] = 10 * total_variation_loss(self.bil_grids.grids)
         
         return loss_dict
-        
+    # Helpers
+    @staticmethod
+    def _to_bchw(hwc: torch.Tensor) -> torch.Tensor:
+        """Convert [H, W, C] to [1, C, H, W]"""
+        return hwc.permute(2, 0, 1).unsqueeze(0)    
+    
+    @staticmethod
+    def _to_hwc(bchw: torch.Tensor) -> torch.Tensor:
+        """Convert [1, C, H, W] to [H, W, C]"""
+        return bchw.squeeze(0).permute(1, 2, 0)
+    
+    def _process_depth(self, depth: torch.Tensor, alpha: torch.Tensor) -> torch.Tensor:
+        """Process raw expected depth from the rasterizer.
+
+        Source: train.py lines 222-237.
+
+        Steps:
+          1. Divide by alpha (convert from accumulated to per-surface depth).
+          2. Replace NaN / Inf with the maximum valid depth value.
+          3. Divide by ``normalize_depth``.
+          4. Min-max normalize to [0, 1] if ``norm_depth_max`` is set.
+
+        Args:
+            depth: [H, W, 1] raw expected depth from rasterization.
+            alpha: [H, W, 1] accumulated alpha / opacity.
+
+        Returns:
+            [H, W, 1] processed depth.
+        """
+        if not self.config.filter_depth:
+            return depth
+
+        d = depth / alpha.clamp(min=1e-8)
+
+        # Replace NaN / Inf
+        valid = torch.isfinite(d)
+        if not valid.all():
+            valid_vals = d[valid]
+            fill = valid_vals.max().item() if valid_vals.numel() > 0 else 100.0
+            d = torch.where(valid, d, torch.tensor(fill, device=d.device, dtype=d.dtype))
+
+        d = d / self.config.normalize_depth
+
+        if self.config.norm_depth_max:
+            d_min, d_max = d.min(), d.max()
+            if d_min != d_max:
+                d = (d - d_min) / (d_max - d_min)
+            else:
+                d = d / d_max.clamp(min=1e-8)
+
+        return d
+    
+    def _freeze_gs_params(self, freeze: bool, colors_only: bool = False) -> None:
+        """Toggle ``requires_grad`` on Gaussian parameter groups.
+
+        Args:
+            freeze: If True, set requires_grad=False; else True.
+            colors_only: If True and freeze=True, only freeze non-color
+                params (keep features_dc/features_rest unfrozen).
+                Source: train.py line 189 -- freeze everything except colors.
+        """
+        for name, param in self.gauss_params.items():
+            if colors_only and name in ("features_dc", "features_rest"):
+                param.requires_grad_(True)
+            else:
+                param.requires_grad_(not freeze)
+                
+    def _freeze_medium_params(self, freeze: bool) -> None:
+        """Toggle ``requires_grad`` on medium model parameters."""
+        if self.backscatter_model is not None:
+            for p in self.backscatter_model.parameters():
+                p.requires_grad_(not freeze)
+        if self.attenuation_model is not None:
+            for p in self.attenuation_model.parameters():
+                p.requires_grad_(not freeze)
