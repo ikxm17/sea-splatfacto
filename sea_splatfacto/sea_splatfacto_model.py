@@ -247,79 +247,75 @@ class SeaSplatfactoModel(SplatfactoModel):
 
     # TODO: Override any potential functions/methods to implement your own method
     # or subclass from "Model" and define all mandatory fields.
-
-        # === Initialize Underwater Models (train.py lines 63-72) ===
+        self.backscatter_model: Optional[BackscatterNetV2] = None
+        self.attenuation_model: Optional[AttenuateNetV3] = None
+        
         if self.config.do_seathru:
-            # BackscatterNetV2 initialization (train.py line 64)
+            # Backscatter and attenuation models
             self.backscatter_model = BackscatterNetV2(
-                use_residual=self.config.use_backscatter_residual,
+                use_residual=self.config.backscatter_use_residual,
                 scale=self.config.backscatter_scale,
-                do_sigmoid=self.config.backscatter_do_sigmoid,
+                do_sigmoid=self.config.backscatter_do_sigmoid
             ).to(self.device)
-            # AttenuateNetV3 initialization (train.py lines 65-70)
             self.attenuation_model = AttenuateNetV3(
                 scale=self.config.attenuation_scale,
-                do_sigmoid=self.config.attenuation_do_sigmoid,
-                init_vals=not self.config.attenuation_do_sigmoid,
-            )
+                do_sigmoid=self.config.attenuation_do_sigmoid
+            ).to(self.device)
+            
+        # Learn background
+        if self.config.learn_background:
+            bg_init = torch.zeros(3, device=self.device)
+            bg_init[0] = 0.05 # R - low initial value
+            bg_init[1] = 0.25 # G - medium initial value
+            bg_init[2] = 0.80 # B - high iniital value
+            self.learned_bg = torch.nn.Parameter(inverse_sigmoid(bg_init))
         else:
-            self.backscatter_model = None
-            self.attenuation_model = None
+            self.register_buffer("learned_bg", torch.zeros(3, device=self.device))
 
-        # === Initialize Loss Criteria (train.py lines 74-84) ===
-        self.depth_smooth_critetion = SmoothDepthLoss().to(self.device)
+        # Loss criteria
+        self.depth_smooth_criterion = SmoothDepthLoss().to(self.device)
         self.gw_criterion = GrayWorldPriorLoss().to(self.device)
         self.rgb_sv_criterion = RGBSpatialVariationLoss().to(self.device)
         self.rgb_01_criterion = RGBSaturationLoss(saturation_limit=1.0).to(self.device)
         self.rgb_sat_criterion = RGBSaturationLoss(saturation_limit=0.7).to(self.device)
-        self.alpha_bg_criterion = AlphaBackgroundLoss(use_kornia=False).to(self.device)
+        self.alpha_bg_criterion = AlphaBackgroundLoss(use_kornia=self.config.use_lab).to(self.device)
         self.dsc_attenuation_criterion = AttenuateLoss().to(self.device)
         self.dcp_criterion = DarkChannelPriorLossV3().to(self.device)
 
-        # === To learn the background ===
-        if self.config.learn_background:
-            bg_init = self.rand(3, device=self.device)
-            bg_init[2] = 0.8
-            bg_init[1] = 0.24
-            bg_init[0] = 0.05
-            self.learned_bg = torch.nn.Parameter(
-                inverse_sigmoid(bg_init.requires_grad_(True))
-            )
-        else:
-            self.learned_bg = None
-
-        # === State variables for training ===
+        # State variables for tracking
+        self.seathru_active: bool = False
         self.backscatter_inited = False
         self.attenuation_inited = False
         self.backscatter_update_counter = 0
         self.attenuation_update_counter = 0
+        self.backscatter_update_iter = 0
+        self.attenuation_update_iter = 0
         self.done_binf_init_with_bg = False
         self.adjust_gs_colors_for_cc = False
         self.update_gs_color_counter = 0
-
+        self._in_medium_burst: bool = False
+        
+        CONSOLE.log(
+            f"[SeaSplat] do_seathru: {self.config.do_seathru}, "
+            f"seathru_from_iter: {self.config.seathru_from_iter},"
+            f"disable_attenuation: {self.config.disable_attenuation}"
+        )
     def get_param_groups(self) -> Dict[str, List[Parameter]]:
         """_summary_
 
         Returns:
             Dict[str, List[Parameter]]: _description_
         """
-        # Get base parameter groups
-        gps = super().get_param_groups()
-
-        # Add learned background parameters
-        if self.config.learn_background and self.learned_bg is not None:
-            gps["learned_bg"] = list(self.learned_bg) # type: ignore
-
-        # add underwater model parameters
-        if (
-            self.config.do_seathru
-            and self.backscatter_model is not None
-            and self.attenuation_model is not None
-        ):
-            gps["backscatter_model"] = list(self.backscatter_model.parameters())
-            gps["attenuation_model"] = list(self.attenuation_model.parameters())
-
-        return gps
+        param_groups = super().get_param_groups() # get base parameter groups
+        
+        if self.config.do_seathru and self.backscatter_model is not None:
+            param_groups["backscatter_model"] = list(self.backscatter_model.parameters())
+        if self.config.do_seathru and self.attenuation_model is not None:
+            param_groups["attenuation_model"] = list(self.attenuation_model.parameters())
+        if self.config.learn_background:
+            param_groups["learned_background"] = [self.learned_bg]
+        
+        return param_groups
 
     def get_outputs(self, camera: Cameras) -> Dict[str, Union[torch.Tensor, List]]:
         """_summary_
@@ -330,77 +326,96 @@ class SeaSplatfactoModel(SplatfactoModel):
         Returns:
             Dict[str, Union[torch.Tensor, List]]: _description_
         """
-        # get base outputs (includes rgb, depth, accumulation, background)
         outputs = super().get_outputs(camera)
-
+        
         if not isinstance(camera, Cameras):
             print("Called get_outputs with not a Cameras instance")
             return {}
         
-        # [H, W, 3]
-        raw_rgb = outputs["rgb"].clone() # type: ignore
-        # [H, W, 1]
-        alpha_image = outputs["alpha"].clone() # type: ignore
+        # Get base outputs (includes rgb, depth, accumulation, background)
+        rendered_image = outputs["rgb"] # [H, W, 3]
+        alpha = outputs["accumulation"] # [H, W, 1]
+        depth_raw = outputs["depth"] # [H, W, 1] or None
         
-        # TODO: should assign a more meaningful name than "image"
+        # Learned background compositing
+        seathru_forward = (
+            self.config.do_seathru
+            and self.backscatter_model is not None
+            and self.attenuation_model is not None
+            and (self.seathru_active or not self.training)
+        )
+        
         if self.config.learn_background:
-            if self.config.bg_from_backscatter and self.config.do_seathru and self.step > self.config.seathru_from_iter:
-                image = raw_rgb
-                if not self.done_binf_init_with_bg:
-                    print(f"{self.step}: Updated backscatter model's B_inf with learned background parameters")
-                    self.backscatter_model.B_inf = torch.nn.Parameter(torch.clone(self.learned_bg.data).reshape(3, 1, 1).to(self.device)) # type: ignore
+            if self.config.bg_from_backscatter and seathru_forward:
+                image = rendered_image # after SeaThru activates, stop adding learned_bg, the backscatter model fills in the water color
             else:
-                bg_image = torch.sigmoid(self.learned_bg).reshape(3, 1, 1) * (1 - alpha_image) # type: ignore
-                bg_detached_image = torch.sigmoid(self.learned_bg).reshape(3, 1, 1) * (1 - alpha_image) # type: ignore
-                image = raw_rgb + bg_image
+                bg_color = torch.sigmoid(self.learned_bg) # [3]
+                bg_image = bg_color.reshape(1, 1, 3) * (1 - alpha) # [H, W, 3]
+                image = rendered_image + bg_image
         else:
-            image = raw_rgb
-        
-        # [H, W, 1] or None
-        depth_image = outputs["depth"].clone() # type: ignore
-        # ? What is going on here?
-        if self.config.filter_depth:
-            depth_image = depth_image = depth_image / alpha_image
-            if torch.any(torch.isnan(torch.logical_or(torch.isnan(depth_image), torch.isinf(depth_image)))):
-                valid_depth_vals = depth_image[torch.logical_not(torch.logical_or(torch.isnan(depth_image), torch.isinf(depth_image)))]
-                if len(valid_depth_vals) == 0:
-                    print(f"[Training] everything is NaN)")
-                else:
-                    not_nan_max = torch.max(valid_depth_vals).item()
-                depth_image = torch.nan_to_num(depth_image, not_nan_max, not_nan_max)
-            depth_image = depth_image / self.config.normalize_depth
-            if self.config.norm_depth_max:
-                if depth_image.min() != depth_image.max():
-                    depth_image = (depth_image - depth_image.min()) / (depth_image.max() - depth_image.min())
-                else:
-                    depth_image = depth_image / depth_image.max()
-        
-        # TODO: if ground truth depth image is available, replace `depth_image` with it here   
-        outputs["processed_depth"] = depth_image          
-        
-        if self.config.do_seathru and self.step > self.config.seathru_from_iter:
-            # reshape from nerfstudio tensor format [H, W, C] to PyTorch tensor format [1, C, H, W]
-            image_batch = image.permute(2, 0, 1).unsqueeze(0) # [1, 3, H, W]
-            depth_image_batch = depth_image.permute(2, 0, 1).unsqueeze(0) # [1, 1, H, W]
+            image = rendered_image
             
-            # estimate attenuation
+            
+        outputs["image"] = image
+        outputs["rendered_image"] = rendered_image
+        
+        # also store the detached bg composited version fro gw_detach_alpha_bg
+        if self.config.learn_background and self.config.gw_detach_alpha_bg:
+            bg_detached = torch.sigmoid(self.learned_bg.detach()).reshape(1, 1, 3) * (1 - alpha)
+            outputs["image_bg_detached"] = rendered_image + bg_detached
+            
+        # Depth processing
+        if depth_raw is not None:
+            depth_processed = self._process_depth(depth_raw, alpha)
+        else:
+            # fallback, create a dummy depth tensor
+            H, W = rendered_image.shape[:2]
+            depth_processed = torch.ones(H, W, 1, device=self.device)
+        outputs["depth_processed"] = depth_processed
+        
+        # SeaThru forward
+        if seathru_forward:
+            # convert to BCHW for medium models
+            image_bchw = self._to_bchw(image) # [1, 3, H, W]
+            depth_bchw = self._to_bchw(depth_processed) # [1, 1, H, W]
+        
+            # attenuation
             if self.config.disable_attenuation:
-                direct_image = image_batch
+                direct_bchw = image_bchw
+                attenuation_map_bchw = torch.ones_like(image_bchw) # all 1s, no attenuation
+                attenuation_map_detach_bchw = attenuation_map_bchw
             else:
-                attenuation = self.attenuation_model(depth_image_batch) # type: ignore
-                direct_image = image_batch * attenuation
-            outputs["attenuation"] = attenuation.squeeze(0).permute(1, 2, 0) # convert to nerfstudio tensor format [H, W, 3]
-            outputs["direct_image"] = direct_image.squeeze(0).permute(1, 2, 0) # convert to nerfstudio tensor format [H, W, 3]
+                attenuation_map_bchw = self.attenuation_model(depth_bchw) # [1, 3, H, W]
+                attenuation_map_detach_bchw = self.attenuation_model(depth_bchw.detach())
+                direct_bchw = image_bchw * attenuation_map_bchw
+                
+            # z-score filter
+            if self.config.do_z_score:
+                d_mean = direct_bchw.mean(dim=[2, 3], keepdim=True)
+                d_std = direct_bchw.std(dim=[2, 3], keepdim=True).clamp(min=1e-8)
+                d_z = (direct_bchw - d_mean) / d_std
+                d_z_clamped = torch.clamp(d_z, -3, 3)
+                direct_bchw = torch.clamp(
+                    (d_z_clamped * d_std)
+                    + torch.maximum(d_mean, torch.tensor(1.0 / 255, device=self.device)),
+                    0, 1,
+                )      
+        
+            # backscatter
+            backscatter_bchw = self.backscatter_model(depth_bchw) # [1, 3, H, W]
+            backscatter_detach_bchw = self.backscatter_model(depth_bchw.detach())
             
-            # TODO: add z-score
+            # combined underwater image
+            uw_bchw = torch.clamp(direct_bchw + backscatter_bchw, 0.0, 1.0)
             
-            # estimate backscatter
-            backscatter = self.backscatter_model(depth_image_batch) # type: ignore
-            outputs["backscatter"] = backscatter.squeeze(0).permute(1, 2, 0) # convert to nerfstudio tensor format [H, W, 3]
-            
-            # underwater image formation
-            underwater_image = torch.clamp(direct_image + backscatter, 0.0, 1.0)
-            outputs["underwater_image"] = underwater_image.squeeze(0).permute(1, 2, 0) # convert to nerfstudio tensor format [H, W, 3]
+            # Store in outputs (HWC format)
+            outputs["underwater_rgb"] = self._to_hwc(uw_bchw)
+            outputs["direct"] = self._to_hwc(direct_bchw)
+            outputs["backscatter"] = self._to_hwc(backscatter_bchw)
+            outputs["attenuation_map"] = self._to_hwc(attenuation_map_bchw)
+            outputs["backscatter_depth_detached"] = self._to_hwc(backscatter_detach_bchw)
+            outputs["attenuation_depth_detached"] = self._to_hwc(attenuation_map_detach_bchw)
+
         return outputs
         
     def get_loss_dict(
@@ -416,126 +431,175 @@ class SeaSplatfactoModel(SplatfactoModel):
         Returns:
             Dict[str, torch.Tensor]: _description_
         """
-        loss_dict = dict()
+        seathru_forward = "underwater_rgb" in outputs
         
-        # get ground truth image
+        modified_outputs = dict(outputs)
+        if seathru_forward:
+            modified_outputs["rgb"] = outputs["underwater_rgb"]
+        else:
+            modified_outputs["rgb"] = outputs["image"]
+
+        loss_dict = super().get_loss_dict(modified_outputs, batch, metrics_dict)
+        
+        
+        # Get commonly used tensors
         gt_image = self.composite_with_background(
-            self.get_gt_image(batch["image"]), outputs["background"]
-        )
+            self.get_gt_img(batch["image"]), outputs["background"]
+        ) # [H, W, 3]
+        image = outputs["image"]                    # clean render + learned_bg
+        rendered_image = outputs["rendered_image"]  # raw render
+        alpha = outputs["accumulation"]             # [H,W,1]
+        depth = outputs["depth_processed"]          # [H,W,1]
         
-        # get predicted image
-        if self.config.do_seathru and self.step > self.config.seathru_from_iter:
-            pred_image = outputs["underwater_image"]
-        else:
-            pred_image = outputs.get("image", outputs["rgb"]) 
+        # tensors in BCHW for loss criteria that expect batch format
+        gt_bchw = self._to_bchw(gt_image)
+        img_bchw = self._to_bchw(image)
+        render_bchw = self._to_bchw(rendered_image)
+        alpha_bchw = self._to_bchw(alpha)
+        depth_bchw = self._to_bchw(depth)
         
-        # get depth image
-        depth_image = outputs["depth"]
+        pred_image = outputs["underwater_rgb"] if seathru_forward else image
+        pred_image_bchw = self._to_bchw(pred_image)
         
-        if self.config.use_depth_weighted_l1:
-            Ll1 = depth_weighted_l1_loss(pred_image, gt_image, depth_image.detach())
-        elif self.config.use_depth_weighted_l2:
-            Ll1 = depth_weighted_l2_loss(pred_image, gt_image, depth_image.detach())
-        else:
-            Ll1 = torch.abs(gt_image - pred_image).mean()
-            
-        simloss = 1 - self.ssim(gt_image.permute(2, 0, 1)[None, ...], pred_image.permute(2, 0, 1)[None, ...])
+        step = self.step
         
-        # main loss implemented by splatfacto
-        main_loss = (1 - self.config.ssim_lambda) * Ll1 + self.config.ssim_lambda * simloss # main_loss from SplatfactoModel's implementation
-        loss_dict["main_loss"] = main_loss
+        # Depth-weighted reconstruction L1
+        if self.config.add_recon_depth_l1:
+            dl1 = depth_weighted_l1_loss(pred_image, gt_image, depth.detach())
+            loss_dict["recon_depth_l1"] = self.config.dwr_lambda * dl1
         
-        # depth weighted l1
-        if self.config.add_recon_depth_l1 and "processed_depth" in outputs:
-            dl1 = depth_weighted_l1_loss(pred_image, gt_image, depth_image.detach())
-            depth_weighted_l1 = self.config.dwr_lambda * dl1
-            loss_dict["depth_weighted_l1_loss"] = depth_weighted_l1
-        
-        # binary accumulation loss
+        # Opacity prior (mixture-of-laplacians)
         if self.config.use_opacity_prior:
-            opacity_prior_loss = mixture_of_laplacians_loss(self.get_gaussian_param_groups()["opacities"]) # TODO: check whether this corresponds to scene.gaussians.get_opacity
-            loss_dict["opacity_prior_loss"] = self.config.opacity_prior_lambda * opacity_prior_loss        
-        
-        # TODO: add the other losses for alpha_bg_loss
-        # alpha background loss
-        if self.config.learn_background:
-            rendered_image = outputs["rgb"]
-            underwater_image = outputs["underwater_image"]
-            alpha_image = outputs["alpha"]
-            alpha_bg_loss = self.alpha_bg_criterion(rendered_image.detach(), torch.sigmoid(self.learned_bg.detach()), alpha_image) # type: ignore
-            if self.config.do_seathru and self.step > self.config.seathru_from_iter:
-                if self.config.alpha_binf_uw:
-                    alpha_bg_loss = self.alpha_bg_criterion(underwater_image.squeeze().detach(), torch.sigmoid(self.backscatter_model.B_inf).squeeze().detach(), alpha_image) # type: ignore
-            loss_dict["alpha_bg_loss"] = self.config.bg_lambda * alpha_bg_loss
-        
-        # depth smooth loss
-        if self.config.use_depth_smooth_loss:
-            gt_image_batch = gt_image.permute(2, 0, 1).unsqueeze(0)
-            depth_image_batch = outputs["processed_depth"].permute(2, 0, 1).unsqueeze(0)
-            depth_smooth_loss = self.depth_smooth_critetion(gt_image_batch, depth_image_batch)
-            loss_dict["depth_smooth_loss"] = self.config.depth_smooth_lambda * depth_smooth_loss
-        
-        # gray world loss  
-        if self.config.use_gw_loss and self.step > self.config.gw_from_iter:
-            image_batch = outputs["image"].permute(2, 0, 1).unsqueeze(0)
-            gw_loss = self.gw_criterion(image_batch)
-            loss_dict["gray_world_loss"] = self.config.gw_loss_lambda * gw_loss
-        
-        # dark channel prior loss
-        if self.config.use_dcp_loss:
-            gt_image_batch = gt_image.permute(2, 0, 1).unsqueeze(0)
-            depth_image_batch = outputs["processed_depth"].permute(2, 0, 1).unsqueeze(0)
-            if self.config.do_seathru and self.step > self.config.seathru_from_iter:
-                backscatter_depth_detached = self.backscatter_model(depth_image_batch.detach()) # type: ignore
-                direct_reversed = gt_image_batch.detach() - backscatter_depth_detached # direct reverse from ground truth through backscatter model
-                dcp_loss, _ = self.dcp_criterion(direct_reversed, depth_image_batch.detach())
-            else:
-                dcp_loss, _ = self.dcp_criterion(gt_image_batch.detach(), depth_image_batch.detach())
-            loss_dict["dark_channel_prior_loss"] = self.config.dcp_loss_lambda * dcp_loss
-                
-        
-        # losses that only apply when seathru
-        if self.config.do_seathru and self.step > self.config.seathru_from_iter:
-            # TODO: rgb spatial variation loss
-            # rgb saturation loss
-            if self.config.use_rgb_sat_loss:
-                image_batch = outputs["image"].permute(2, 0, 1).unsqueeze(0)
-                rgb_sat_loss = self.rgb_sat_criterion(image_batch)
-                loss_dict["rgb_saturation_loss"] = self.config.sat_loss_lambda * rgb_sat_loss
-            # TODO: B_inf loss
-            # dsc attenuation loss
-            if self.config.use_dsc_attenuation_loss:
-                gt_image_batch = gt_image.permute(2, 0, 1).unsqueeze(0)
-                depth_image_batch = outputs["processed_depth"].permute(2, 0, 1).unsqueeze(0)
-                attenuation = outputs["attenuation"].permute(2, 0, 1).unsqueeze(0)
-                attenuation_depth_detached = attenuation_model(depth_image_batch.detach()) # type: ignore
-                direct_reversed = (gt_image_batch - outputs["backscatter"].permute(2, 0, 1).unsqueeze(0))
-                if self.config.disable_attenuation:
-                    J_through_attenuation = torch.zeros_like(direct_reversed)
-                else:
-                    J_through_attenuation = direct_reversed / attenuation_depth_detached
-                dsc_attenuation_loss = self.dsc_attenuation_criterion(direct_reversed, J_through_attenuation)
-                loss_dict["dsc_attenuation_loss"] = self.config.dsc_attenuation_lambda * dsc_attenuation_loss
-        
-        # from parent: scale regulaization
-        if self.config.use_scale_regularization and self.step % 10 == 0:
-            scale_exp = torch.exp(self.scales)
-            scale_reg = (
-                torch.maximum(
-                    scale_exp.amax(dim=-1) / scale_exp.amin(dim=-1),
-                    torch.tensor(self.config.max_gauss_ratio),
-                )
-                - self.config.max_gauss_ratio
+            loss_dict["opacity_prior"] = (
+                self.config.opacity_prior_lambda * mixture_of_laplacians_loss(torch.sigmoid(self.opacities))
             )
-            loss_dict["scale_reg"] = 0.1 * scale_reg.mean()
-        else:
-            loss_dict["scale_reg"] = torch.tensor(0.0, device=self.device)
             
-        # from parent: add camera optimizer loss if training
-        if self.training:
-            self.camera_optimizer.get_loss_dict(loss_dict)
-            if self.config.use_bilateral_grid:
-                loss_dict["tv_loss"] = 10 * total_variation_loss(self.bil_grids.grids)
+        # Alpha-background loss
+        if self.config.learn_background:
+            alpha_bg_loss = self.alpha_bg_criterion(
+                rendered_image.permute(2, 0, 1).detach(),
+                torch.sigmoid(self.learned_bg.detach()),
+                alpha.permute(2, 0, 1),
+            )
+        
+            if seathru_forward:
+                uw_chw = outputs["underwater_rgb"].permute(2, 0, 1)
+                binf_sig = torch.sigmoid(self.backscatter_model.B_inf.detach())
+                
+                if self.config.alpha_binf_uw or self.config.alpha_binf_render or self.config.alpha_bg_opacities:
+                    if not self.config.add_bg_binf:
+                        alpha_bg_loss = torch.tensor(0.0, device=self.device)
+                    if self.config.alpha_binf_uw:
+                        alpha_bg_loss = alpha_bg_loss + self.alpha_bg_criterion(
+                            uw_chw.detach(), binf_sig.squeeze(), alpha.permute(2, 0, 1),
+                        )
+                    if self.config.alpha_bg_uw:
+                        alpha_bg_loss = alpha_bg_loss + self.alpha_bg_criterion(
+                            uw_chw.detach(), binf_sig.squeeze(), alpha.permute(2, 0, 1),
+                        )
+                    if self.config.alpha_binf_render:
+                        alpha_bg_loss = alpha_bg_loss + self.alpha_bg_criterion(
+                            rendered_image.permute(2, 0, 1).detach(),
+                            binf_sig.squeeze(),
+                            alpha.permute(2, 0, 1),
+                        )
+                    if self.config.alpha_bg_opacities:
+                        alpha_bg_loss = alpha_bg_loss + self.alpha_bg_criterion(
+                            self.colors.detach(),                     # [N,3]
+                            binf_sig.squeeze(),                       # [3]
+                            torch.sigmoid(self.opacities).squeeze(),  # [N]
+                        )
+
+                elif self.config.bg_from_backscatter:
+                    if self.config.turn_off_bg_loss:
+                        alpha_bg_loss = torch.tensor(0.0, device=self.device)
+                    else:
+                        alpha_bg_loss = self.alpha_bg_criterion(
+                            uw_chw.detach(),
+                            torch.sigmoid(self.learned_bg.detach()),
+                            alpha.permute(2, 0, 1),
+                        )
+
+            loss_dict["alpha_bg"] = self.config.bg_lambda * alpha_bg_loss
+        
+        
+        # Depth L1 loss vs GT depth
+        if self.config.use_depth_l1_loss and "depth_image" in batch:
+            gt_depth = batch["depth_image"].to(self.device)  # [H,W,1]
+            loss_dict["depth_l1"] = 0.1 * torch.abs(depth - gt_depth).mean()
+            
+        # Depth smoothness loss (edge-aware) 
+        if self.config.use_depth_smooth_loss:
+            loss_dict["depth_smooth"] = (
+                self.config.depth_smooth_lambda * self.depth_smooth_criterion(gt_bchw, depth_bchw)
+            )
+
+        # Alpha smoothness loss
+        if self.config.use_alpha_smooth_loss:
+            loss_dict["alpha_smooth"] = (
+                self.config.alpha_smooth_lambda
+                * self.depth_smooth_criterion(gt_bchw, alpha_bchw)
+            )
+        
+        # Gray world prior
+        if self.config.use_gw_loss and step > self.config.gw_from_iter:
+            if self.config.use_render_for_gw:
+                gw_input = render_bchw
+            elif self.config.gw_detach_alpha_bg and "image_bg_detached" in outputs:
+                gw_input = self._to_bchw(outputs["image_bg_detached"])
+            elif self.config.gw_reverse_J and seathru_forward:
+                # J = direct.detach() / attenuation
+                direct_bchw = self._to_bchw(outputs["direct"])
+                at_bchw = self._to_bchw(outputs["attenuation_map"])
+                gw_input = direct_bchw.detach() / at_bchw.clamp(min=1e-8)
+            else:
+                gw_input = img_bchw
+
+            if self.config.gw_filter_by_alpha > 0.0:
+                mask = alpha.detach().squeeze(-1) > self.config.gw_filter_by_alpha  # [H,W]
+                # Flatten to [1, C, N] for the criterion
+                gw_input = gw_input[:, :, mask]
+
+            loss_dict["gray_world"] = self.config.gw_loss_lambda * self.gw_criterion(gw_input)
+        
+        # SeaThru loss (only active after SeaThru activation)
+        if seathru_forward:
+            backscatter_detach_bchw = self._to_bchw(outputs["backscatter_depth_detached"])
+            attenuation_detach_bchw = self._to_bchw(outputs["attenuation_depth_detached"])
+            direct_bchw = self._to_bchw(outputs["direct"])
+            backscatter_bchw = self._to_bchw(outputs["backscatter"])
+            
+            # DCP loss (dark channel prior on estimated direct signal)
+            if self.config.use_dcp_loss:
+                reverse_direct = gt_bchw.detach() - backscatter_detach_bchw
+                dcp_loss, _ = self.dcp_criterion(reverse_direct, depth_bchw.detach())
+                loss_dict["dcp"] = self.config.dcp_loss_lambda * dcp_loss
+        
+            # RGB saturation loss
+            if self.config.use_rgb_sat_loss:
+                loss_dict["rgb_sat"] = self.config.sat_loss_lambda * self.rgb_sat_criterion(img_bchw)
+    
+            
+            # RGB spatial variation loss
+            if self.config.use_rgb_sv_loss:
+                loss_dict["rgb_sv"] = 0.01 * self.rgb_sv_criterion(img_bchw.detach(), direct_bchw) # TODO: Why is 0.01 not a variable?
+            
+            # B_inf loss
+            if self.config.use_binf_loss:
+                loss_dict["binf"] = self.config.binf_loss_lambda * self.backscatter_model.forward_rgb(img_bchw.detach())
+                
+            
+            # DSC attenuation loss
+            if self.config.use_dsc_attenuation_loss:
+                reverse_direct_detached = (gt_bchw - backscatter_bchw).detach()
+                if self.config.disable_attenuation:
+                    J = torch.zeros_like(reverse_direct_detached)
+                else:
+                    J = reverse_direct_detached / attenuation_detach_bchw.clamp(min=1e-8)
+                loss_dict["dsc_attenuation"] = self.config.dsc_attenuation_lambda * self.dsc_attenuation_criterion(reverse_direct_detached, J)
+        else:
+            # TODO: Compute Pre-SeaThru DCP but NOT added to loss in original SeaSplat (for logging if needed)
+            pass
         
         return loss_dict
     # Helpers
