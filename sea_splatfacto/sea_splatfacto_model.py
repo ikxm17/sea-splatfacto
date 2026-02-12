@@ -69,7 +69,7 @@ class SeaSplatfactoModelConfig(SplatfactoModelConfig):
     Add your custom model config parameters here.
     """
 
-    _target: Type = field(default_factory=lambda: SplatfactoModel)
+    _target: Type = field(default_factory=lambda: SeaSplatfactoModel)
 
     # === SeaThru Core Parameters ===
     do_seathru: bool = True
