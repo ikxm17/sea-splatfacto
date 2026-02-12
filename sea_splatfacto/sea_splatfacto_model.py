@@ -71,109 +71,168 @@ class SeaSplatfactoModelConfig(SplatfactoModelConfig):
 
     _target: Type = field(default_factory=lambda: SeaSplatfactoModel)
 
-    # === SeaThru Core Parameters ===
-    do_seathru: bool = True
-    """Enable underwater image formation model"""
-    seathru_from_iter: int = 5000
-    """Iteration to start seathru modeling (original default: 9_000_000, set lower to enable)"""
-    backscatter_attenuation_lr: float = 1e-2
-    """Learning rate for backscatter/attenuation models"""
-    backscatter_scale: float = 5.0
-    """Scale for backscatter parameters"""
-    attenuation_scale: float = 5.0
-    """Scale for attenuation parameters"""
-    backscatter_do_sigmoid: bool = False
-    """Use sigmoid activation for backscatter params"""
-    attenuation_do_sigmoid: bool = False
-    """Use sigmoid activation for attenuation params"""
-    use_backscatter_residual: bool = False
-    """Use residual term in backscatter model"""
-    use_at_v3: bool = True
-    """Use AttenuateNetV3 (simplified)"""
-    disable_attenuation: bool = False
-    """Disable attenuation (backscatter only model)"""
-
-    # === Update Schedule ===
-    update_backscatter_attenuation_interval: int = 100
-    """Every N GS updates, update backscatter/at models"""
-    update_backscatter_attenuation_count: int = 50
-    """Update backscatter/at models this many times per interval"""
-
-    # === Background Parameters ===
-    learn_background: bool = True
-    """Learn background color composited with splat render"""
-    bg_lambda: float = 0.01
-    """Lambda for background alpha loss"""
-    bg_from_backscatter: bool = True
-    """Once seathru enabled, use B_inf instead of learned_bg"""
-    bg_lr: float = 1e-2
-    """Learning rate for background color"""
-    alpha_binf_uw: bool = True
-    """Use B_inf for alpha loss on underwater image"""
-
-    # === Depth Parameters ===
-    use_depth_smooth_loss: bool = True
-    """Enable depth smoothness loss"""
-    depth_smooth_lambda: float = 2.0
-    """Lambda for depth smooth loss"""
-    filter_depth: bool = True
-    """Filter depth by alpha and normalize"""
-    normalize_depth: float = 1.0
-    """Normalize depth by this value"""
-    norm_depth_max: bool = True
-    """Normalize depth to [0, 1] range"""
-    depth_alpha_threshold: float = 0.5
-    """Alpha threshold for depth masking"""
-
-    # === Gray World Loss ===
-    use_gw_loss: bool = True
-    """Enable gray world prior loss"""
-    gw_loss_lambda: float = 0.1
-    """Lambda for gray world loss"""
-    gw_from_iter: int = 10000
-    """Start gray world loss from this iteration"""
-
-    # === Dark Channel Prior Loss ===
-    use_dcp_loss: bool = True
-    """Enable dark channel prior loss"""
-    dcp_loss_lambda: float = 1.0
-    """Lambda for DCP loss"""
-
-    # === RGB Saturation Loss ===
-    use_rgb_sat_loss: bool = True
-    """Enable RGB saturation loss"""
-    sat_loss_lambda: float = 2.0
-    """Lambda for saturation loss"""
-
-    # === Attenuation Loss ===
-    use_dsc_attenuation_loss: bool = False
-    """Enable DeepSeeColor attenuation loss"""
-    dsc_attenuation_lambda: float = 1.0
-    """Lambda for DSC attenuation loss"""
-
-    # === Additional Losses ===
-    use_depth_weighted_l1: bool = False
-    use_depth_weighted_l2: bool = False
+    # Override Splatfacto defaults
+    output_depth_during_training: bool = True # rendered depth is needed at every step for the medium models
+    background_color: Literal["black", "white", "learned"] = "black" # background compositing is handled ourselves via learned_background, so the base renderer shoudl composite against black (i.e. contribute nothing)
     
-    use_alpha_smooth_loss: bool = False
-    """Enable alpha smoothness loss (arguments.py line 97)"""
-    alpha_smooth_lambda: float = 1.0
-
-    use_opacity_prior: bool = False
-    """Enable bimodal opacity prior (arguments.py line 99)"""
-    opacity_prior_lambda: float = 0.0001
-
-    add_recon_depth_l1: bool = True
-    """Add depth-weighted L1 reconstruction loss (arguments.py line 100)"""
-    dwr_lambda: float = 1.0
-
-    # === Parameter Freezing ===
+    # Gaussian Splatting behavior
+    do_isotropic: bool = False
+    """Force isotropic (uniform-scale) Gaussians."""
     freeze_gs_from_iter: int = 9_000_000
-    """Freeze gaussian splat parameters from this iteration"""
+    """Freeze all GS parameters (except colors) from this iteration."""
     unfreeze_gs_from_iter: int = 9_000_000
-    """Unfreeze gaussian splat parameters from this iteration"""
+    """Unfreeze GS parameters from this iteration."""
+    shuffle: bool = True
+    """Shuffle camera order each epoch."""
+    use_depth_weighted_l1: bool = False
+    """Use depth-weighted L1 for the main reconstruction loss."""
+    use_depth_weighted_l2: bool = False
+    """Use depth-weighted L2 for the main reconstruction loss."""
+    
+    # Learned background
+    learn_background: bool = True
+    """Learn a background color composited via alpha: image = render + sigmoid(background) * (1 - alpha)."""
+    bg_lambda: float = 0.01
+    """Weight for the alpha-background loss."""
+    add_bg_binf: bool = False
+    """When using alpha_binf_* variants, also keep the base learned_background loss term (additive rather than replacement)"""
+    use_lab: bool = False
+    """Use L*a*b color difference in AlphaBackgroundLoss instead of RGB."""
+    bg_lr: float = 1e-2
+    """Learning rate for the learned background parameter."""
+    bg_from_backscatter: bool = True
+    """Once SeaThru activates, stop using learned_bg and let backscatter handle the water color.  B_inf is initialized from learned_bg at that point."""
+    alpha_bg_opacities: bool = False
+    """Compute alpha-background loss on per-Gaussian opacities (using SH to RGB colors) in addition to the rendered image."""
+    alpha_binf_uw: bool = True
+    """Compute alpha-background loss using B_inf against the underwater image (instead of learned_background) once SeaThru is active."""
+    alpha_binf_render: bool = False
+    """Compute alpha-background loss using B_inf against the underwater image once SeaThru is active."""
+    alpha_bg_uw: bool = False
+    """Compute alpha-background loss using B_inf against the underwater image (duplicate variant of alpha_binf_uw)."""
+    turn_off_bg_loss: bool = False
+    """Completely disable the alpha-background loss after SeaThru activates (when bg_from backscatter is True)."""
+    
+    # Depth processing
+    use_gt_depth: bool = False
+    """Swap out rendered depth with pseudo ground-truth depth maps."""
+    use_depth_l1_loss: bool = False
+    """Use L1 loss between rendered depth and GT depth."""
+    use_depth_smooth_loss: bool = True
+    """Edge-aware depth smootheness loss weighted by RGB gradients."""
+    depth_smooth_lambda: float = 2.0
+    """Weight for depth smoothness loss."""
+    filter_depth: bool = True
+    """Divide rendered depth by alpha and clean up NaN/Inf values"""
+    normalize_depth: float = 1.0
+    """Divide depth by this constant before further normalization."""
+    norm_depth_max: bool = True
+    """Min-max normalize depth to [0, 1]."""
+    depth_alpha_threshold: float = 0.5
+    """Alpha threshold used when masking depth for visualization / evaluation."""
 
-
+    # Alpha smoothness loss
+    use_alpha_smooth_loss: bool = True
+    """Apply the same edge-aware smoothness loss to the alpha/accumulation map."""
+    alpha_smooth_lambda: float = 1.0
+    """Weight for the alpha smoothness loss."""
+    
+    # Opacity prior loss
+    use_opacity_prior: bool = False
+    """Mixture-of-Laplacians prior pushing opacities toward 0 or 1."""
+    opacity_prior_lambda: float = 0.0001
+    """Weight for the opacity prior loss."""
+    
+    # Depth smoothness loss
+    use_depth_smooth_loss: bool = True
+    """Edge-aware depth smoothness loss weighted by RGB gradients."""
+    depth_smooth_lambda: float = 2.0
+    """Weight for depth smoothness loss."""
+    
+    # Depth-weighted reconstruction loss
+    add_recon_depth_l1: bool = True
+    """Add a depth-weighted L1 reconstruction loss."""
+    dwr_lambda: float = 1.0
+    """Weight for the depth-weighted reconstruction loss."""
+    
+    # Dark channel prior loss
+    use_dcp_loss: bool = True
+    """Dark channel prior loss — encourages haze-free direct signal."""
+    dcp_loss_lambda: float = 1.0
+    """Weight for DCP loss."""
+    
+    # RGB saturation loss
+    use_rgb_sat_loss: bool = True
+    """Penalize rendered pixel values outside [0, saturation_val]."""
+    sat_loss_lambda: float = 2.0
+    """Weight for the RGB saturation loss."""
+    
+    # Gray world prior loss
+    use_gw_loss: bool = True
+    """Push mean channel intensities toward 0.5 (gray world assumption)."""
+    gw_loss_lambda: float = 0.1
+    """Weight for the gray world loss."""
+    gw_reverse_J: bool = False
+    """Apply gray world loss on J = direct / attenuation (the fully restored image) instead of the rendered image."""
+    use_render_for_gw: bool = False
+    """Apply gray world loss on the raw rendered image (before learned background compositing)."""
+    gw_detach_alpha_bg: bool = False
+    """Detach the learned_bg when compositing for the gray world loss input, so gradients only flow through the Gaussians"""
+    gw_from_iter: int = 10_000
+    """Only activate gray world loss after this iteration."""
+    gw_filter_by_alpha: float = 0.0
+    """If > 0, only include pixel with alpha above this threshold in the gray world loss computation."""
+    
+    # RGB spatial variation loss
+    use_rgb_sv_loss: bool = False
+    """Ensure the restored image has similar spatial variation to the input (from DeepSeeColor)."""
+    
+    # B_inf loss
+    use_binf_loss: bool = False
+    """Push B_inf toward the estimated atmospheric light from dark channel prior estimation."""
+    binf_loss_lambda: float = 1.0
+    """Weight for the B_inf loss."""
+    
+    # DeepSeeColor attenuation loss
+    use_dsc_attenuation_loss: bool = False
+    """Regularize the resoted image J = (GT - backscatter) / attenuation to have reasonable intensity and spatial statistics."""
+    dsc_attenuation_lambda: float = 1.0
+    """Weight for the DSC attenuation loss."""
+    
+    # SeaThru medium models
+    do_seathru: bool = True
+    """Master toggle for the SeaThru underwater medium modelling. When False, the model behaves as standard Splatfacto with learned background and regularization losses only."""
+    seathru_from_iter: int = 15_000
+    """Iteration at which to activate the SeaThru medium models.  Set to a value larger than max_num_iterations to effectively disable."""
+    backscatter_attenuation_lr: float = 1e-2
+    """Learning rate for both the backscatter and attenuation models."""
+    backscatter_scale: float = 5.0
+    """Scale factor for BackscatterNetV2 depth-dependent coefficients."""
+    attenuation_scale: float = 5.0
+    """Scale factor for AttenuateNetV3 depth-dependent coefficients."""
+    backscatter_do_sigmoid: bool = False
+    """Use sigmoid (instead of clamp) on backscatter conv parameters."""
+    attenuation_do_sigmoid: bool = False
+    """Use sigmoid (instead of clamp) on attenuation conv parameters."""
+    backscatter_use_residual: bool = False
+    """Include the residual J_prime * exp(-β_d * z) term in the backscatter
+    model (equation 10 from SeaThru)."""
+    use_at_v2: bool = False
+    """Use AttenuateNetV2 (drops some terms) instead of the default."""
+    use_at_v3: bool = True
+    """Use AttenuateNetV3 (simplest) — the default attenuation model."""
+    disable_attenuation: bool = False
+    """Simplified model that only accounts for backscatter (no attenuation)."""
+    update_bs_at_interval: int = 100
+    """Every this many GS training steps, perform a burst of medium-only
+    updates."""
+    update_bs_at_count: int = 50
+    """Number of consecutive medium-only optimizer steps per burst."""
+    scale_grad_threshold: float = 1.0
+    """Multiplier on the densification gradient threshold after GS parameters are unfrozen (post-SeaThru activation)."""
+    do_z_score: bool = False
+    """Z-score filter the direct signal to ±3 standard deviations (clamps extreme values)."""
+    
 class SeaSplatfactoModel(SplatfactoModel):
     """_summary_
 
