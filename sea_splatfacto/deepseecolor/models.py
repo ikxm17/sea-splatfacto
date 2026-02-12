@@ -87,6 +87,17 @@ class BackscatterNetV2(nn.Module):
 
         return backscatter
 
+    def forward_rgb(self, rgb):
+        from utils.uw_utils import estimate_atmospheric_light
+        
+        atmospheric_colors = list()
+        for rgb_image in rgb:
+            atmospheric_colors.append(estimate_atmospheric_light(rgb_image.detach()))
+        
+        atmospheric_color = torch.mean(torch.stack(atmospheric_colors), dim=0)
+        
+        return self.l2(atmospheric_color.squeeze(), self.B_inf.squeeze())
+        
 
 class AttenuateNetV3(nn.Module):
     """_summary_
