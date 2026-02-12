@@ -76,11 +76,11 @@ sea_splatfacto_method = MethodSpecification(
                 "optimizer": AdamOptimizerConfig(lr=1e-2, eps=1e-15),
                 "scheduler": None,
             },
-            "atteniation_model": {
+            "attenuation_model": {
                 "optimizer": AdamOptimizerConfig(lr=1e-2, eps=1e-15),
                 "scheduler": None,
             },
-            "learned_bg": {
+            "learned_background": {
                 "optimizer": AdamOptimizerConfig(lr=1e-2, eps=1e-15),
                 "scheduler": None,
             },
