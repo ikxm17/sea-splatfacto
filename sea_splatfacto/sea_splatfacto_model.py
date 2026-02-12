@@ -300,6 +300,67 @@ class SeaSplatfactoModel(SplatfactoModel):
             f"seathru_from_iter: {self.config.seathru_from_iter},"
             f"disable_attenuation: {self.config.disable_attenuation}"
         )
+    
+    def step_post_backward(self, step: int) -> None:
+        """After backward: null out gradients for frozen groups and
+        conditionally run the Splatfacto densification strategy.
+
+        In the original code, ``continue`` statements skip the GS optimizer
+        step during medium bursts and skip the medium optimizer step during GS
+        color adjustment.  Here we achieve the same effect by setting
+        ``param.grad = None`` for groups that should NOT be updated -- Adam's
+        ``step()`` skips any parameter whose ``.grad`` is ``None``.
+
+        Source: train.py lines 430-463 (alternating optimization),
+                train.py lines 516-557 (densification -- skipped when frozen).
+        """
+        if self._in_medium_burst:
+            # Medium-only: null out GS and learned_bg gradients
+            for param in self.gauss_params.values():
+                param.grad = None
+            if self.config.learn_background and isinstance(self.learned_bg, Parameter):
+                self.learned_bg.grad = None
+            # Skip densification during medium bursts
+            return
+
+        if self.adjust_gs_colors_for_cc:
+            # GS color-only: null out non-color GS params and medium params
+            for name, param in self.gauss_params.items():
+                if name not in ("features_dc", "features_rest"):
+                    param.grad = None
+            if self.backscatter_model is not None:
+                for p in self.backscatter_model.parameters():
+                    p.grad = None
+            if self.attenuation_model is not None:
+                for p in self.attenuation_model.parameters():
+                    p.grad = None
+            # Skip densification during color adjustment
+            return
+
+        # Normal operation -- run Splatfacto's strategy (densification/pruning)
+        super().step_post_backward(step)
+
+    def get_training_callbacks(
+        self, training_callback_attributes: TrainingCallbackAttributes
+    ) -> List[TrainingCallback]:
+        """_summary_
+
+        Args:
+            training_callback_attributes (TrainingCallbackAttributes): _description_
+
+        Returns:
+            List[TrainingCallback]: _description_
+        """
+        cbs = super().get_training_callbacks(training_callback_attributes)
+        
+        cbs.append(
+            TrainingCallback(
+                [TrainingCallbackLocation.BEFORE_TRAIN_ITERATION],
+                self._seasplat_before_iteration,
+            )
+        )
+        return cbs
+    
     def get_param_groups(self) -> Dict[str, List[Parameter]]:
         """_summary_
 
@@ -781,3 +842,117 @@ class SeaSplatfactoModel(SplatfactoModel):
         if self.attenuation_model is not None:
             for p in self.attenuation_model.parameters():
                 p.requires_grad_(not freeze)
+                
+    # Callbacks
+    def _seasplat_before_iteration(self, step: int) -> None:
+        """BEFORE_TRAIN_ITERATION callback -- manage training phases.
+
+        Phases (source: train.py lines 174-192, 430-463):
+          (a) GS freeze / unfreeze at configurable iterations.
+          (b) SeaThru activation at seathru_from_iter:
+              - Initialize B_inf from learned_bg.
+              - Start 1000-step medium-only warm-up burst.
+          (c) After warm-up: 2000-step GS color-only adjustment.
+          (d) Joint training with periodic medium bursts every
+              update_bs_at_interval steps.
+        """
+        # --- (a) GS freeze / unfreeze ---
+        # Source: train.py lines 174-192
+        if step == self.config.freeze_gs_from_iter:
+            CONSOLE.log(f"[SeaSplat][{step}] Freezing GS params (except colors)")
+            self._freeze_gs_params(freeze=True, colors_only=True)
+        if step == self.config.unfreeze_gs_from_iter:
+            CONSOLE.log(f"[SeaSplat][{step}] Unfreezing GS params")
+            self._freeze_gs_params(freeze=False)
+
+        if not self.config.do_seathru:
+            return
+
+        # --- (b) SeaThru activation ---
+        if step >= self.config.seathru_from_iter and not self.seathru_active:
+            self.seathru_active = True
+            CONSOLE.log(f"[SeaSplat][{step}] SeaThru activated")
+
+            # Initialize B_inf from learned_bg
+            # Source: train.py lines 208-212
+            if (
+                self.config.learn_background
+                and self.config.bg_from_backscatter
+                and not self.done_binf_init_with_bg
+                and self.backscatter_model is not None
+            ):
+                with torch.no_grad():
+                    self.backscatter_model.B_inf.data.copy_(
+                        self.learned_bg.data.reshape(3, 1, 1)
+                    )
+                self.done_binf_init_with_bg = True
+                CONSOLE.log(
+                    f"[SeaSplat][{step}] B_inf initialized from learned_bg = "
+                    f"{torch.sigmoid(self.learned_bg).tolist()}"
+                )
+
+            # Start initial 1000-step medium-only warm-up burst
+            self._in_medium_burst = True
+            self.backscatter_update_counter = 0
+            self.attenuation_update_counter = 0
+
+        # --- Alternating optimization logic ---
+        # Source: train.py lines 433-463
+        if not self.seathru_active:
+            return
+
+        if self._in_medium_burst:
+            # Determine burst length: 1000 for initial, update_bs_at_count
+            # for periodic bursts.
+            # Source: train.py line 436
+            burst_target = 1000 if not self.backscatter_inited else self.config.update_bs_at_count
+
+            if self.backscatter_update_counter >= burst_target:
+                # Burst complete -- restore normal training
+                # Source: train.py lines 437-444
+                self.backscatter_update_counter = 0
+                self.attenuation_update_counter = 0
+                self._in_medium_burst = False
+                self._freeze_gs_params(freeze=False)
+                self._freeze_medium_params(freeze=False)
+
+                if not self.backscatter_inited:
+                    CONSOLE.log(
+                        f"[SeaSplat][{step}] Medium warm-up complete (1000 steps)"
+                    )
+                    self.backscatter_inited = True
+                    self.attenuation_inited = True
+                    self.adjust_gs_colors_for_cc = True
+            else:
+                # Still in burst -- freeze GS, unfreeze medium
+                # Source: train.py lines 446-453 (only medium optimizers step)
+                self._freeze_gs_params(freeze=True)
+                self._freeze_medium_params(freeze=False)
+                self.backscatter_update_counter += 1
+                self.attenuation_update_counter += 1
+                self.backscatter_update_iter += 1
+                self.attenuation_update_iter += 1
+
+        elif self.adjust_gs_colors_for_cc:
+            # GS color adjustment phase -- only GS colors update
+            # Source: train.py lines 456-463
+            if self.update_gs_color_counter >= 2000:
+                CONSOLE.log(f"[SeaSplat][{step}] GS color adjustment complete")
+                self.adjust_gs_colors_for_cc = False
+                self._freeze_medium_params(freeze=False)
+                self._freeze_gs_params(freeze=False)
+            else:
+                self._freeze_medium_params(freeze=True)
+                self._freeze_gs_params(freeze=False)
+                self.update_gs_color_counter += 1
+
+        else:
+            # Normal joint training -- check if periodic burst should start
+            # Source: train.py line 434
+            self._freeze_gs_params(freeze=False)
+            self._freeze_medium_params(freeze=False)
+
+            if self.backscatter_inited and step % self.config.update_bs_at_interval == 0:
+                self._in_medium_burst = True
+                self.backscatter_update_counter = 0
+                self.attenuation_update_counter = 0
