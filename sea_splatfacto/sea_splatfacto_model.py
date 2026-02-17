@@ -264,23 +264,23 @@ class SeaSplatfactoModel(SplatfactoModel):
             
         # Learn background
         if self.config.learn_background:
-            bg_init = torch.zeros(3, device=self.device)
+            bg_init = torch.zeros(3)
             bg_init[0] = 0.05 # R - low initial value
             bg_init[1] = 0.25 # G - medium initial value
             bg_init[2] = 0.80 # B - high iniital value
             self.learned_bg = torch.nn.Parameter(inverse_sigmoid(bg_init))
         else:
-            self.register_buffer("learned_bg", torch.zeros(3, device=self.device))
+            self.register_buffer("learned_bg", torch.zeros(3))
 
         # Loss criteria
-        self.depth_smooth_criterion = SmoothDepthLoss().to(self.device)
-        self.gw_criterion = GrayWorldPriorLoss().to(self.device)
-        self.rgb_sv_criterion = RGBSpatialVariationLoss().to(self.device)
+        self.depth_smooth_criterion = SmoothDepthLoss()
+        self.gw_criterion = GrayWorldPriorLoss()
+        self.rgb_sv_criterion = RGBSpatialVariationLoss()
         self.rgb_01_criterion = RGBSaturationLoss(saturation_limit=1.0).to(self.device)
         self.rgb_sat_criterion = RGBSaturationLoss(saturation_limit=0.7).to(self.device)
-        self.alpha_bg_criterion = AlphaBackgroundLoss(use_kornia=self.config.use_lab).to(self.device)
-        self.dsc_attenuation_criterion = AttenuateLoss().to(self.device)
-        self.dcp_criterion = DarkChannelPriorLossV3().to(self.device)
+        self.alpha_bg_criterion = AlphaBackgroundLoss(use_kornia=self.config.use_lab)
+        self.dsc_attenuation_criterion = AttenuateLoss()
+        self.dcp_criterion = DarkChannelPriorLossV3()
 
         # State variables for tracking
         self.seathru_active: bool = False
