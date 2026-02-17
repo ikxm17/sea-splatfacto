@@ -47,8 +47,8 @@ from nerfstudio.utils.misc import torch_compile
 from nerfstudio.utils.rich_utils import CONSOLE
 from nerfstudio.utils.spherical_harmonics import RGB2SH, SH2RGB, num_sh_bases
 
-from deepseecolor.models import BackscatterNetV2, AttenuateNetV3
-from deepseecolor.losses import (
+from sea_splatfacto.deepseecolor.models import BackscatterNetV2, AttenuateNetV3
+from sea_splatfacto.deepseecolor.losses import (
     AttenuateLoss,
     DarkChannelPriorLossV3,
     GrayWorldPriorLoss,
@@ -59,8 +59,12 @@ from deepseecolor.losses import (
     mixture_of_laplacians_loss,
 )
 
-from utils.general_utils import inverse_sigmoid
-from utils.loss_utils import depth_weighted_l1_loss, depth_weighted_l2_loss
+from sea_splatfacto.utils.general_utils import inverse_sigmoid
+from sea_splatfacto.utils.loss_utils import (
+    depth_weighted_l1_loss,
+    depth_weighted_l2_loss,
+)
+
 
 @dataclass
 class SeaSplatfactoModelConfig(SplatfactoModelConfig):
