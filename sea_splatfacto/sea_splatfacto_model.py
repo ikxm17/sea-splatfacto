@@ -294,22 +294,24 @@ class SeaSplatfactoModel(SplatfactoModel):
         self.adjust_gs_colors_for_cc = False
         self.update_gs_color_counter = 0
         self._in_medium_burst: bool = False
-        
+        self._gs_frozen: bool = False
+
         CONSOLE.log(
             f"[SeaSplat] do_seathru: {self.config.do_seathru}, "
             f"seathru_from_iter: {self.config.seathru_from_iter},"
             f"disable_attenuation: {self.config.disable_attenuation}"
         )
-    
-    def step_post_backward(self, step: int) -> None:
-        """After backward: null out gradients for frozen groups and
-        conditionally run the Splatfacto densification strategy.
 
-        In the original code, ``continue`` statements skip the GS optimizer
-        step during medium bursts and skip the medium optimizer step during GS
-        color adjustment.  Here we achieve the same effect by setting
-        ``param.grad = None`` for groups that should NOT be updated -- Adam's
-        ``step()`` skips any parameter whose ``.grad`` is ``None``.
+    def step_post_backward(self, step: int) -> None:
+        """After backward: null out gradients for groups that should NOT be
+        updated this step, then conditionally run Splatfacto's densification.
+
+        This is the SOLE place where selective optimization is enforced.
+        We cannot toggle ``requires_grad`` because gsplat's
+        ``DefaultStrategy.step_pre_backward()`` (called during the forward
+        pass) needs all GS params to have ``requires_grad=True`` so it can
+        call ``.retain_grad()``.  Instead we null out ``.grad`` after
+        backward -- Adam skips any parameter whose ``.grad`` is ``None``.
 
         Source: train.py lines 430-463 (alternating optimization),
                 train.py lines 516-557 (densification -- skipped when frozen).
@@ -335,6 +337,15 @@ class SeaSplatfactoModel(SplatfactoModel):
                 for p in self.attenuation_model.parameters():
                     p.grad = None
             # Skip densification during color adjustment
+            return
+
+        if self._gs_frozen:
+            # Config-driven GS freeze: null out all GS grads except colors
+            # Source: train.py lines 174-192
+            for name, param in self.gauss_params.items():
+                if name not in ("features_dc", "features_rest"):
+                    param.grad = None
+            # Still skip densification when GS is frozen
             return
 
         # Normal operation -- run Splatfacto's strategy (densification/pruning)
@@ -845,7 +856,15 @@ class SeaSplatfactoModel(SplatfactoModel):
                 
     # Callbacks
     def _seasplat_before_iteration(self, step: int) -> None:
-        """BEFORE_TRAIN_ITERATION callback -- manage training phases.
+        """BEFORE_TRAIN_ITERATION callback -- manage training phase state.
+
+        IMPORTANT: We do NOT toggle ``requires_grad`` here because gsplat's
+        ``DefaultStrategy.step_pre_backward()`` (called inside
+        ``super().get_outputs()``) needs ``requires_grad=True`` on GS params
+        to call ``.retain_grad()``.  Instead, we only update phase-tracking
+        flags; the actual selective optimization is handled in
+        ``step_post_backward()`` by nulling out gradients for groups that
+        should not be updated.
 
         Phases (source: train.py lines 174-192, 430-463):
           (a) GS freeze / unfreeze at configurable iterations.
@@ -854,16 +873,16 @@ class SeaSplatfactoModel(SplatfactoModel):
               - Start 1000-step medium-only warm-up burst.
           (c) After warm-up: 2000-step GS color-only adjustment.
           (d) Joint training with periodic medium bursts every
-              update_bs_at_interval steps.
+              update_backscatter_at_interval steps.
         """
         # --- (a) GS freeze / unfreeze ---
-        # Source: train.py lines 174-192
+        # Tracked via self._gs_frozen; enforced in step_post_backward.
         if step == self.config.freeze_gs_from_iter:
             CONSOLE.log(f"[SeaSplat][{step}] Freezing GS params (except colors)")
-            self._freeze_gs_params(freeze=True, colors_only=True)
+            self._gs_frozen = True
         if step == self.config.unfreeze_gs_from_iter:
             CONSOLE.log(f"[SeaSplat][{step}] Unfreezing GS params")
-            self._freeze_gs_params(freeze=False)
+            self._gs_frozen = False
 
         if not self.config.do_seathru:
             return
@@ -896,25 +915,23 @@ class SeaSplatfactoModel(SplatfactoModel):
             self.backscatter_update_counter = 0
             self.attenuation_update_counter = 0
 
-        # --- Alternating optimization logic ---
+        # --- Alternating optimization state machine ---
         # Source: train.py lines 433-463
         if not self.seathru_active:
             return
 
         if self._in_medium_burst:
-            # Determine burst length: 1000 for initial, update_bs_at_count
-            # for periodic bursts.
-            # Source: train.py line 436
-            burst_target = 1000 if not self.backscatter_inited else self.config.update_bs_at_count
+            burst_target = (
+                1000
+                if not self.backscatter_inited
+                else self.config.update_backscatter_at_count
+            )
 
             if self.backscatter_update_counter >= burst_target:
-                # Burst complete -- restore normal training
-                # Source: train.py lines 437-444
+                # Burst complete
                 self.backscatter_update_counter = 0
                 self.attenuation_update_counter = 0
                 self._in_medium_burst = False
-                self._freeze_gs_params(freeze=False)
-                self._freeze_medium_params(freeze=False)
 
                 if not self.backscatter_inited:
                     CONSOLE.log(
@@ -924,35 +941,24 @@ class SeaSplatfactoModel(SplatfactoModel):
                     self.attenuation_inited = True
                     self.adjust_gs_colors_for_cc = True
             else:
-                # Still in burst -- freeze GS, unfreeze medium
-                # Source: train.py lines 446-453 (only medium optimizers step)
-                self._freeze_gs_params(freeze=True)
-                self._freeze_medium_params(freeze=False)
                 self.backscatter_update_counter += 1
                 self.attenuation_update_counter += 1
                 self.backscatter_update_iter += 1
                 self.attenuation_update_iter += 1
 
         elif self.adjust_gs_colors_for_cc:
-            # GS color adjustment phase -- only GS colors update
-            # Source: train.py lines 456-463
             if self.update_gs_color_counter >= 2000:
                 CONSOLE.log(f"[SeaSplat][{step}] GS color adjustment complete")
                 self.adjust_gs_colors_for_cc = False
-                self._freeze_medium_params(freeze=False)
-                self._freeze_gs_params(freeze=False)
             else:
-                self._freeze_medium_params(freeze=True)
-                self._freeze_gs_params(freeze=False)
                 self.update_gs_color_counter += 1
 
         else:
             # Normal joint training -- check if periodic burst should start
-            # Source: train.py line 434
-            self._freeze_gs_params(freeze=False)
-            self._freeze_medium_params(freeze=False)
-
-            if self.backscatter_inited and step % self.config.update_bs_at_interval == 0:
+            if (
+                self.backscatter_inited
+                and step % self.config.update_backscatter_at_interval == 0
+            ):
                 self._in_medium_burst = True
                 self.backscatter_update_counter = 0
                 self.attenuation_update_counter = 0
