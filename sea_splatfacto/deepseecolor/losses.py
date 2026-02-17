@@ -240,28 +240,23 @@ class AlphaBackgroundLoss(nn.Module):
             else:
                 mask = torch.exp(-clamped_diff / 0.05) # what is 0.05
             masked_alpha = alpha * mask
-            try:
-                if torch.sum(mask) == 0:
-                    loss = torch.Tensor([0,0]).squeeze().cuda()
-                else:
-                    loss = self.mse(masked_alpha, torch.zeros_like(masked_alpha))
-            except:
-                import pdb; pdb.set_trace()
+            if torch.sum(mask) == 0:
+                loss = torch.Tensor([0, 0]).squeeze().cuda()
+            else:
+                loss = self.mse(masked_alpha, torch.zeros_like(masked_alpha))
+
         else:
             mask = dist < self.threshold
             if len(alpha.size()) == 1:
                 masked_alpha = alpha[mask]
             else:
                 masked_alpha = alpha[:, mask]
-            try:
-                if torch.sum(mask) == 0:
-                    loss = torch.Tensor([0,0]).squeeze().cuda()
-                else:
-                    loss = self.l1_loss(masked_alpha, torch.zeros_like(masked_alpha))
-            except:
-                import pdb; pdb.set_trace()
+            if torch.sum(mask) == 0:
+                loss = torch.Tensor([0, 0]).squeeze().cuda()
+            else:
+                loss = self.l1_loss(masked_alpha, torch.zeros_like(masked_alpha))
         return loss
-    
+
 def mixture_of_laplacians_loss(x):
     """_summary_
 
