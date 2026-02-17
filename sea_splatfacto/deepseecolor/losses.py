@@ -79,7 +79,7 @@ class DarkChannelPriorLossV3(nn.Module):
         self.relu = nn.ReLU()
         self.cost_ratio = cost_ratio
 
-    def forrward(self, direct, depth=None):
+    def forward(self, direct, depth=None):
         """_summary_
 
         Args:
