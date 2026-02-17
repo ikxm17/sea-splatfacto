@@ -186,13 +186,16 @@ class RGBSaturationLoss(nn.Module):
     Args:
         nn (_type_): _description_
     """
-    def __init__(self, saturation_limit: float = 1.0):
+
+    def __init__(self, saturation_val: float = 1.0):
         super().__init__()
         self.relu = nn.ReLU()
-        self.saturation_limit = saturation_limit
-        
+        self.saturation_val = saturation_val
+
     def forward(self, rgb):
-        saturation_loss = (self.relu(-rgb) + self.relu(rgb - self.saturation_val)).square().mean()
+        saturation_loss = (
+            (self.relu(-rgb) + self.relu(rgb - self.saturation_val)).square().mean()
+        )
         if torch.any(torch.isnan(saturation_loss)):
             print("NaN RGB Saturation loss!")
         return saturation_loss
