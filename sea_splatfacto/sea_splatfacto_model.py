@@ -707,7 +707,15 @@ class SeaSplatfactoModel(SplatfactoModel):
         else:
             # TODO: Compute Pre-SeaThru DCP but NOT added to loss in original SeaSplat (for logging if needed)
             pass
-        
+
+        for k, v in loss_dict.items():
+            if isinstance(v, torch.Tensor) and v.dim() != 0:
+                CONSOLE.log(
+                    f"[SeaSplat] WARNING: loss '{k}' is non-scalar "
+                    f"(shape={v.shape}), reducing with .mean()"
+                )
+                loss_dict[k] = v.mean()
+
         return loss_dict
     
     def get_image_metrics_and_images(
