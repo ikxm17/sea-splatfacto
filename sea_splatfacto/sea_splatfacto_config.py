@@ -23,8 +23,8 @@ from sea_splatfacto.sea_splatfacto_model import SeaSplatfactoModelConfig
 sea_splatfacto_method = MethodSpecification(
     config=TrainerConfig(
         method_name="sea-splatfacto",  # TODO: rename to your own model
-        steps_per_eval_batch=500,
-        steps_per_eval_all_images=1000,
+        steps_per_eval_batch=100,
+        steps_per_eval_all_images=0,
         steps_per_save=2000,
         max_num_iterations=30000,
         mixed_precision=False,
