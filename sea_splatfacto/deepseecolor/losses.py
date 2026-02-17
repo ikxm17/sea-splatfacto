@@ -138,6 +138,7 @@ class SmoothDepthLoss(nn.Module):
 
     def __init__(self):
         """_summary_"""
+        super().__init__()
 
     def forward(self, rgb, depth):
         """_summary_
