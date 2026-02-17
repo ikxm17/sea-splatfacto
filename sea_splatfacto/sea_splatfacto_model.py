@@ -574,37 +574,46 @@ class SeaSplatfactoModel(SplatfactoModel):
             
         # Alpha-background loss
         if self.config.learn_background:
+            alpha_chw = alpha.permute(2, 0, 1)
             alpha_bg_loss = self.alpha_bg_criterion(
                 rendered_image.permute(2, 0, 1).detach(),
                 torch.sigmoid(self.learned_bg.detach()),
-                alpha.permute(2, 0, 1),
+                alpha_chw,
             )
-        
+
             if seathru_forward:
                 uw_chw = outputs["underwater_rgb"].permute(2, 0, 1)
                 binf_sig = torch.sigmoid(self.backscatter_model.B_inf.detach())
-                
-                if self.config.alpha_binf_uw or self.config.alpha_binf_render or self.config.alpha_bg_opacities:
+
+                if (
+                    self.config.alpha_binf_uw
+                    or self.config.alpha_binf_render
+                    or self.config.alpha_bg_opacities
+                ):
                     if not self.config.add_bg_binf:
                         alpha_bg_loss = torch.tensor(0.0, device=self.device)
                     if self.config.alpha_binf_uw:
                         alpha_bg_loss = alpha_bg_loss + self.alpha_bg_criterion(
-                            uw_chw.detach(), binf_sig.squeeze(), alpha.permute(2, 0, 1),
+                            uw_chw.detach(),
+                            binf_sig.squeeze(),
+                            alpha_chw,
                         )
                     if self.config.alpha_bg_uw:
                         alpha_bg_loss = alpha_bg_loss + self.alpha_bg_criterion(
-                            uw_chw.detach(), binf_sig.squeeze(), alpha.permute(2, 0, 1),
+                            uw_chw.detach(),
+                            binf_sig.squeeze(),
+                            alpha_chw,
                         )
                     if self.config.alpha_binf_render:
                         alpha_bg_loss = alpha_bg_loss + self.alpha_bg_criterion(
                             rendered_image.permute(2, 0, 1).detach(),
                             binf_sig.squeeze(),
-                            alpha.permute(2, 0, 1),
+                            alpha_chw,
                         )
                     if self.config.alpha_bg_opacities:
                         alpha_bg_loss = alpha_bg_loss + self.alpha_bg_criterion(
-                            self.colors.detach(),                     # [N,3]
-                            binf_sig.squeeze(),                       # [3]
+                            self.colors.detach(),  # [N,3]
+                            binf_sig.squeeze(),  # [3]
                             torch.sigmoid(self.opacities).squeeze(),  # [N]
                         )
 
@@ -615,7 +624,7 @@ class SeaSplatfactoModel(SplatfactoModel):
                         alpha_bg_loss = self.alpha_bg_criterion(
                             uw_chw.detach(),
                             torch.sigmoid(self.learned_bg.detach()),
-                            alpha.permute(2, 0, 1),
+                            alpha_chw,
                         )
 
             loss_dict["alpha_bg"] = self.config.bg_lambda * alpha_bg_loss
