@@ -147,8 +147,12 @@ class SmoothDepthLoss(nn.Module):
             rgb (_type_): _description_
             depth (_type_): _description_
         """
-        depth_dx = depth.diff(dim=-1)  # calulate differences across horizontal dimension; shape: B x 1 x H x (W-1)
-        depth_dy = depth.diff(dim=-2) # calculate differences across vertical dimension; shape: B x 1 x (H-1) x W
+        depth_dx = depth.diff(
+            dim=-1
+        )  # calulate differences across horizontal dimension; shape: B x 1 x H x (W-1)
+        depth_dy = depth.diff(
+            dim=-2
+        )  # calculate differences across vertical dimension; shape: B x 1 x (H-1) x W
 
         rgb_dx = torch.mean(
             rgb.diff(dim=-1), dim=-3, keepdim=True
@@ -159,6 +163,7 @@ class SmoothDepthLoss(nn.Module):
 
         return torch.abs(depth_dx).mean() + torch.abs(depth_dy).mean()
 
+
 class RGBSpatialVariationLoss(nn.Module):
     """_summary_
 
@@ -168,6 +173,7 @@ class RGBSpatialVariationLoss(nn.Module):
     Returns:
         _type_: _description_
     """
+
     def __init__(self):
         super().__init__()
         self.mse = nn.MSELoss()
@@ -201,26 +207,31 @@ class RGBSaturationLoss(nn.Module):
             print("NaN RGB Saturation loss!")
         return saturation_loss
 
+
 class AlphaBackgroundLoss(nn.Module):
     """_summary_
 
     Args:
         nn (_type_): _description_
     """
+
     def __init__(self, use_kornia: bool = False):
         super().__init__()
         self.use_kornia = use_kornia
+        self.l1_loss = nn.L1Loss()
         if use_kornia:
-            self.range = math.sqrt(100 * 100 + 255 * 255 + 255 * 255) # ? what are these numbers
-            self.threshold  = 50 # ? what are these numbers
+            self.range = math.sqrt(
+                100 * 100 + 255 * 255 + 255 * 255
+            )  # ? what are these numbers
+            self.threshold = 50  # ? what are these numbers
         else:
-            self.range = math.sqrt(3) # ? what are these numbers
-            self.threshold = 0.2 * math.sqrt(3) # ? what are these numbers
-        
+            self.range = math.sqrt(3)  # ? what are these numbers
+            self.threshold = 0.2 * math.sqrt(3)  # ? what are these numbers
+
     def forward(self, rgb, background, alpha):
         if self.use_kornia:
             lab_image = rgb_to_lab(rgb)
-            lab_background = rgb_to_lab(background.reshape(3,1,1)) # ? what is lab
+            lab_background = rgb_to_lab(background.reshape(3, 1, 1))  # ? what is lab
             diff = lab_image - lab_background
             dist = torch.linalg.vector_norm(diff, dim=0)
         else:
@@ -228,17 +239,17 @@ class AlphaBackgroundLoss(nn.Module):
                 diff = rgb - background
                 dist = torch.linalg.vector_norm(diff, dim=0)
             else:
-                diff = rgb - background.reshape(3,1,1)
+                diff = rgb - background.reshape(3, 1, 1)
                 dist = torch.linalg.vector_norm(diff, dim=0)
-                
+
         # ? other approach from seasplat
         other_approach = False
         if other_approach:
-            clamped_diff = torch.max(dist - self.threshold, torch.Tensor([0,0]).cuda())
+            clamped_diff = torch.max(dist - self.threshold, torch.Tensor([0, 0]).cuda())
             if self.use_kornia:
-                mask = torch.exp(-clamped_diff / 10) # ? what is 10
+                mask = torch.exp(-clamped_diff / 10)  # ? what is 10
             else:
-                mask = torch.exp(-clamped_diff / 0.05) # what is 0.05
+                mask = torch.exp(-clamped_diff / 0.05)  # what is 0.05
             masked_alpha = alpha * mask
             if torch.sum(mask) == 0:
                 loss = torch.Tensor([0, 0]).squeeze().cuda()
@@ -257,6 +268,7 @@ class AlphaBackgroundLoss(nn.Module):
                 loss = self.l1_loss(masked_alpha, torch.zeros_like(masked_alpha))
         return loss
 
+
 def mixture_of_laplacians_loss(x):
     """_summary_
 
@@ -265,4 +277,4 @@ def mixture_of_laplacians_loss(x):
     """
     lp1 = torch.exp(-torch.abs(x) / 0.1)
     lp2 = torch.exp(-torch.abs(1 - x) / 0.1)
-    return -torch.mean(torch.log(lp1 + lp2)) 
+    return -torch.mean(torch.log(lp1 + lp2))

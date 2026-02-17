@@ -76,9 +76,13 @@ class SeaSplatfactoModelConfig(SplatfactoModelConfig):
     _target: Type = field(default_factory=lambda: SeaSplatfactoModel)
 
     # Override Splatfacto defaults
-    output_depth_during_training: bool = True # rendered depth is needed at every step for the medium models
-    background_color: Literal["black", "white", "learned"] = "black" # background compositing is handled ourselves via learned_background, so the base renderer shoudl composite against black (i.e. contribute nothing)
-    
+    output_depth_during_training: bool = (
+        True  # rendered depth is needed at every step for the medium models
+    )
+    background_color: Literal["black", "white", "learned"] = (
+        "black"  # background compositing is handled ourselves via learned_background, so the base renderer shoudl composite against black (i.e. contribute nothing)
+    )
+
     # Gaussian Splatting behavior
     do_isotropic: bool = False
     """Force isotropic (uniform-scale) Gaussians."""
@@ -92,7 +96,7 @@ class SeaSplatfactoModelConfig(SplatfactoModelConfig):
     """Use depth-weighted L1 for the main reconstruction loss."""
     use_depth_weighted_l2: bool = False
     """Use depth-weighted L2 for the main reconstruction loss."""
-    
+
     # Learned background
     learn_background: bool = True
     """Learn a background color composited via alpha: image = render + sigmoid(background) * (1 - alpha)."""
@@ -116,7 +120,7 @@ class SeaSplatfactoModelConfig(SplatfactoModelConfig):
     """Compute alpha-background loss using B_inf against the underwater image (duplicate variant of alpha_binf_uw)."""
     turn_off_bg_loss: bool = False
     """Completely disable the alpha-background loss after SeaThru activates (when bg_from backscatter is True)."""
-    
+
     # Depth processing
     use_gt_depth: bool = False
     """Swap out rendered depth with pseudo ground-truth depth maps."""
@@ -136,41 +140,41 @@ class SeaSplatfactoModelConfig(SplatfactoModelConfig):
     """Alpha threshold used when masking depth for visualization / evaluation."""
 
     # Alpha smoothness loss
-    use_alpha_smooth_loss: bool = True
+    use_alpha_smooth_loss: bool = False
     """Apply the same edge-aware smoothness loss to the alpha/accumulation map."""
     alpha_smooth_lambda: float = 1.0
     """Weight for the alpha smoothness loss."""
-    
+
     # Opacity prior loss
     use_opacity_prior: bool = False
     """Mixture-of-Laplacians prior pushing opacities toward 0 or 1."""
     opacity_prior_lambda: float = 0.0001
     """Weight for the opacity prior loss."""
-    
+
     # Depth smoothness loss
     use_depth_smooth_loss: bool = True
     """Edge-aware depth smoothness loss weighted by RGB gradients."""
     depth_smooth_lambda: float = 2.0
     """Weight for depth smoothness loss."""
-    
+
     # Depth-weighted reconstruction loss
     add_recon_depth_l1: bool = True
     """Add a depth-weighted L1 reconstruction loss."""
     dwr_lambda: float = 1.0
     """Weight for the depth-weighted reconstruction loss."""
-    
+
     # Dark channel prior loss
     use_dcp_loss: bool = True
     """Dark channel prior loss — encourages haze-free direct signal."""
     dcp_loss_lambda: float = 1.0
     """Weight for DCP loss."""
-    
+
     # RGB saturation loss
     use_rgb_sat_loss: bool = True
     """Penalize rendered pixel values outside [0, saturation_val]."""
     sat_loss_lambda: float = 2.0
     """Weight for the RGB saturation loss."""
-    
+
     # Gray world prior loss
     use_gw_loss: bool = True
     """Push mean channel intensities toward 0.5 (gray world assumption)."""
@@ -186,27 +190,27 @@ class SeaSplatfactoModelConfig(SplatfactoModelConfig):
     """Only activate gray world loss after this iteration."""
     gw_filter_by_alpha: float = 0.0
     """If > 0, only include pixel with alpha above this threshold in the gray world loss computation."""
-    
+
     # RGB spatial variation loss
     use_rgb_sv_loss: bool = False
     """Ensure the restored image has similar spatial variation to the input (from DeepSeeColor)."""
-    
+
     # B_inf loss
     use_binf_loss: bool = False
     """Push B_inf toward the estimated atmospheric light from dark channel prior estimation."""
     binf_loss_lambda: float = 1.0
     """Weight for the B_inf loss."""
-    
+
     # DeepSeeColor attenuation loss
     use_dsc_attenuation_loss: bool = False
     """Regularize the resoted image J = (GT - backscatter) / attenuation to have reasonable intensity and spatial statistics."""
     dsc_attenuation_lambda: float = 1.0
     """Weight for the DSC attenuation loss."""
-    
+
     # SeaThru medium models
     do_seathru: bool = True
     """Master toggle for the SeaThru underwater medium modelling. When False, the model behaves as standard Splatfacto with learned background and regularization losses only."""
-    seathru_from_iter: int = 15_000
+    seathru_from_iter: int = 10_000
     """Iteration at which to activate the SeaThru medium models.  Set to a value larger than max_num_iterations to effectively disable."""
     backscatter_attenuation_lr: float = 1e-2
     """Learning rate for both the backscatter and attenuation models."""
@@ -227,16 +231,17 @@ class SeaSplatfactoModelConfig(SplatfactoModelConfig):
     """Use AttenuateNetV3 (simplest) — the default attenuation model."""
     disable_attenuation: bool = False
     """Simplified model that only accounts for backscatter (no attenuation)."""
-    update_bs_at_interval: int = 100
+    update_backscatter_at_interval: int = 100
     """Every this many GS training steps, perform a burst of medium-only
     updates."""
-    update_bs_at_count: int = 50
+    update_backscatter_at_count: int = 50
     """Number of consecutive medium-only optimizer steps per burst."""
     scale_grad_threshold: float = 1.0
     """Multiplier on the densification gradient threshold after GS parameters are unfrozen (post-SeaThru activation)."""
     do_z_score: bool = False
     """Z-score filter the direct signal to ±3 standard deviations (clamps extreme values)."""
-    
+
+
 class SeaSplatfactoModel(SplatfactoModel):
     """_summary_
 
@@ -249,29 +254,29 @@ class SeaSplatfactoModel(SplatfactoModel):
     def populate_modules(self):
         super().populate_modules()
 
-    # TODO: Override any potential functions/methods to implement your own method
-    # or subclass from "Model" and define all mandatory fields.
+        # TODO: Override any potential functions/methods to implement your own method
+        # or subclass from "Model" and define all mandatory fields.
         self.backscatter_model: Optional[BackscatterNetV2] = None
         self.attenuation_model: Optional[AttenuateNetV3] = None
-        
+
         if self.config.do_seathru:
             # Backscatter and attenuation models
             self.backscatter_model = BackscatterNetV2(
                 use_residual=self.config.backscatter_use_residual,
                 scale=self.config.backscatter_scale,
-                do_sigmoid=self.config.backscatter_do_sigmoid
-            ).to(self.device)
+                do_sigmoid=self.config.backscatter_do_sigmoid,
+            )
             self.attenuation_model = AttenuateNetV3(
                 scale=self.config.attenuation_scale,
-                do_sigmoid=self.config.attenuation_do_sigmoid
-            ).to(self.device)
-            
+                do_sigmoid=self.config.attenuation_do_sigmoid,
+            )
+
         # Learn background
         if self.config.learn_background:
             bg_init = torch.zeros(3)
-            bg_init[0] = 0.05 # R - low initial value
-            bg_init[1] = 0.25 # G - medium initial value
-            bg_init[2] = 0.80 # B - high iniital value
+            bg_init[0] = 0.05  # R - low initial value
+            bg_init[1] = 0.25  # G - medium initial value
+            bg_init[2] = 0.80  # B - high iniital value
             self.learned_bg = torch.nn.Parameter(inverse_sigmoid(bg_init))
         else:
             self.register_buffer("learned_bg", torch.zeros(3))
@@ -367,7 +372,7 @@ class SeaSplatfactoModel(SplatfactoModel):
             List[TrainingCallback]: _description_
         """
         cbs = super().get_training_callbacks(training_callback_attributes)
-        
+
         cbs.append(
             TrainingCallback(
                 [TrainingCallbackLocation.BEFORE_TRAIN_ITERATION],
@@ -375,22 +380,26 @@ class SeaSplatfactoModel(SplatfactoModel):
             )
         )
         return cbs
-    
+
     def get_param_groups(self) -> Dict[str, List[Parameter]]:
         """_summary_
 
         Returns:
             Dict[str, List[Parameter]]: _description_
         """
-        param_groups = super().get_param_groups() # get base parameter groups
-        
+        param_groups = super().get_param_groups()  # get base parameter groups
+
         if self.config.do_seathru and self.backscatter_model is not None:
-            param_groups["backscatter_model"] = list(self.backscatter_model.parameters())
+            param_groups["backscatter_model"] = list(
+                self.backscatter_model.parameters()
+            )
         if self.config.do_seathru and self.attenuation_model is not None:
-            param_groups["attenuation_model"] = list(self.attenuation_model.parameters())
+            param_groups["attenuation_model"] = list(
+                self.attenuation_model.parameters()
+            )
         if self.config.learn_background:
             param_groups["learned_background"] = [self.learned_bg]
-        
+
         return param_groups
 
     def get_outputs(self, camera: Cameras) -> Dict[str, Union[torch.Tensor, List]]:
@@ -403,16 +412,16 @@ class SeaSplatfactoModel(SplatfactoModel):
             Dict[str, Union[torch.Tensor, List]]: _description_
         """
         outputs = super().get_outputs(camera)
-        
+
         if not isinstance(camera, Cameras):
             print("Called get_outputs with not a Cameras instance")
             return {}
-        
+
         # Get base outputs (includes rgb, depth, accumulation, background)
-        rendered_image = outputs["rgb"] # [H, W, 3]
-        alpha = outputs["accumulation"] # [H, W, 1]
-        depth_raw = outputs["depth"] # [H, W, 1] or None
-        
+        rendered_image = outputs["rgb"]  # [H, W, 3]
+        alpha = outputs["accumulation"]  # [H, W, 1]
+        depth_raw = outputs["depth"]  # [H, W, 1] or None
+
         # Learned background compositing
         seathru_forward = (
             self.config.do_seathru
@@ -420,26 +429,27 @@ class SeaSplatfactoModel(SplatfactoModel):
             and self.attenuation_model is not None
             and (self.seathru_active or not self.training)
         )
-        
+
         if self.config.learn_background:
             if self.config.bg_from_backscatter and seathru_forward:
-                image = rendered_image # after SeaThru activates, stop adding learned_bg, the backscatter model fills in the water color
+                image = rendered_image  # after SeaThru activates, stop adding learned_bg, the backscatter model fills in the water color
             else:
-                bg_color = torch.sigmoid(self.learned_bg) # [3]
-                bg_image = bg_color.reshape(1, 1, 3) * (1 - alpha) # [H, W, 3]
+                bg_color = torch.sigmoid(self.learned_bg)  # [3]
+                bg_image = bg_color.reshape(1, 1, 3) * (1 - alpha)  # [H, W, 3]
                 image = rendered_image + bg_image
         else:
             image = rendered_image
-            
-            
+
         outputs["image"] = image
         outputs["rendered_image"] = rendered_image
-        
+
         # also store the detached bg composited version fro gw_detach_alpha_bg
         if self.config.learn_background and self.config.gw_detach_alpha_bg:
-            bg_detached = torch.sigmoid(self.learned_bg.detach()).reshape(1, 1, 3) * (1 - alpha)
+            bg_detached = torch.sigmoid(self.learned_bg.detach()).reshape(1, 1, 3) * (
+                1 - alpha
+            )
             outputs["image_bg_detached"] = rendered_image + bg_detached
-            
+
         # Depth processing
         if depth_raw is not None:
             depth_processed = self._process_depth(depth_raw, alpha)
@@ -448,23 +458,29 @@ class SeaSplatfactoModel(SplatfactoModel):
             H, W = rendered_image.shape[:2]
             depth_processed = torch.ones(H, W, 1, device=self.device)
         outputs["depth_processed"] = depth_processed
-        
+
         # SeaThru forward
         if seathru_forward:
             # convert to BCHW for medium models
-            image_bchw = self._to_bchw(image) # [1, 3, H, W]
-            depth_bchw = self._to_bchw(depth_processed) # [1, 1, H, W]
-        
+            image_bchw = self._to_bchw(image)  # [1, 3, H, W]
+            depth_bchw = self._to_bchw(depth_processed)  # [1, 1, H, W]
+
             # attenuation
             if self.config.disable_attenuation:
                 direct_bchw = image_bchw
-                attenuation_map_bchw = torch.ones_like(image_bchw) # all 1s, no attenuation
+                attenuation_map_bchw = torch.ones_like(
+                    image_bchw
+                )  # all 1s, no attenuation
                 attenuation_map_detach_bchw = attenuation_map_bchw
             else:
-                attenuation_map_bchw = self.attenuation_model(depth_bchw) # [1, 3, H, W]
-                attenuation_map_detach_bchw = self.attenuation_model(depth_bchw.detach())
+                attenuation_map_bchw = self.attenuation_model(
+                    depth_bchw
+                )  # [1, 3, H, W]
+                attenuation_map_detach_bchw = self.attenuation_model(
+                    depth_bchw.detach()
+                )
                 direct_bchw = image_bchw * attenuation_map_bchw
-                
+
             # z-score filter
             if self.config.do_z_score:
                 d_mean = direct_bchw.mean(dim=[2, 3], keepdim=True)
@@ -473,24 +489,31 @@ class SeaSplatfactoModel(SplatfactoModel):
                 d_z_clamped = torch.clamp(d_z, -3, 3)
                 direct_bchw = torch.clamp(
                     (d_z_clamped * d_std)
-                    + torch.maximum(d_mean, torch.tensor(1.0 / 255, device=self.device)),
-                    0, 1,
-                )      
-        
+                    + torch.maximum(
+                        d_mean, torch.tensor(1.0 / 255, device=self.device)
+                    ),
+                    0,
+                    1,
+                )
+
             # backscatter
-            backscatter_bchw = self.backscatter_model(depth_bchw) # [1, 3, H, W]
+            backscatter_bchw = self.backscatter_model(depth_bchw)  # [1, 3, H, W]
             backscatter_detach_bchw = self.backscatter_model(depth_bchw.detach())
-            
+
             # combined underwater image
             uw_bchw = torch.clamp(direct_bchw + backscatter_bchw, 0.0, 1.0)
-            
+
             # Store in outputs (HWC format)
             outputs["underwater_rgb"] = self._to_hwc(uw_bchw)
             outputs["direct"] = self._to_hwc(direct_bchw)
             outputs["backscatter"] = self._to_hwc(backscatter_bchw)
             outputs["attenuation_map"] = self._to_hwc(attenuation_map_bchw)
-            outputs["backscatter_depth_detached"] = self._to_hwc(backscatter_detach_bchw)
-            outputs["attenuation_depth_detached"] = self._to_hwc(attenuation_map_detach_bchw)
+            outputs["backscatter_depth_detached"] = self._to_hwc(
+                backscatter_detach_bchw
+            )
+            outputs["attenuation_depth_detached"] = self._to_hwc(
+                attenuation_map_detach_bchw
+            )
 
         return outputs
 
@@ -534,7 +557,7 @@ class SeaSplatfactoModel(SplatfactoModel):
             Dict[str, torch.Tensor]: _description_
         """
         seathru_forward = "underwater_rgb" in outputs
-        
+
         modified_outputs = dict(outputs)
         if seathru_forward:
             modified_outputs["rgb"] = outputs["underwater_rgb"]
@@ -542,40 +565,40 @@ class SeaSplatfactoModel(SplatfactoModel):
             modified_outputs["rgb"] = outputs["image"]
 
         loss_dict = super().get_loss_dict(modified_outputs, batch, metrics_dict)
-        
-        
+
         # Get commonly used tensors
         gt_image = self.composite_with_background(
             self.get_gt_img(batch["image"]), outputs["background"]
-        ) # [H, W, 3]
-        image = outputs["image"]                    # clean render + learned_bg
+        )  # [H, W, 3]
+        image = outputs["image"]  # clean render + learned_bg
         rendered_image = outputs["rendered_image"]  # raw render
-        alpha = outputs["accumulation"]             # [H,W,1]
-        depth = outputs["depth_processed"]          # [H,W,1]
-        
+        alpha = outputs["accumulation"]  # [H,W,1]
+        depth = outputs["depth_processed"]  # [H,W,1]
+
         # tensors in BCHW for loss criteria that expect batch format
         gt_bchw = self._to_bchw(gt_image)
         img_bchw = self._to_bchw(image)
         render_bchw = self._to_bchw(rendered_image)
         alpha_bchw = self._to_bchw(alpha)
         depth_bchw = self._to_bchw(depth)
-        
+
         pred_image = outputs["underwater_rgb"] if seathru_forward else image
         pred_image_bchw = self._to_bchw(pred_image)
-        
+
         step = self.step
-        
+
         # Depth-weighted reconstruction L1
         if self.config.add_recon_depth_l1:
             dl1 = depth_weighted_l1_loss(pred_image, gt_image, depth.detach())
             loss_dict["recon_depth_l1"] = self.config.dwr_lambda * dl1
-        
+
         # Opacity prior (mixture-of-laplacians)
         if self.config.use_opacity_prior:
             loss_dict["opacity_prior"] = (
-                self.config.opacity_prior_lambda * mixture_of_laplacians_loss(torch.sigmoid(self.opacities))
+                self.config.opacity_prior_lambda
+                * mixture_of_laplacians_loss(torch.sigmoid(self.opacities))
             )
-            
+
         # Alpha-background loss
         if self.config.learn_background:
             alpha_chw = alpha.permute(2, 0, 1)
@@ -632,17 +655,17 @@ class SeaSplatfactoModel(SplatfactoModel):
                         )
 
             loss_dict["alpha_bg"] = self.config.bg_lambda * alpha_bg_loss
-        
-        
+
         # Depth L1 loss vs GT depth
         if self.config.use_depth_l1_loss and "depth_image" in batch:
             gt_depth = batch["depth_image"].to(self.device)  # [H,W,1]
             loss_dict["depth_l1"] = 0.1 * torch.abs(depth - gt_depth).mean()
-            
-        # Depth smoothness loss (edge-aware) 
+
+        # Depth smoothness loss (edge-aware)
         if self.config.use_depth_smooth_loss:
             loss_dict["depth_smooth"] = (
-                self.config.depth_smooth_lambda * self.depth_smooth_criterion(gt_bchw, depth_bchw)
+                self.config.depth_smooth_lambda
+                * self.depth_smooth_criterion(gt_bchw, depth_bchw)
             )
 
         # Alpha smoothness loss
@@ -651,7 +674,7 @@ class SeaSplatfactoModel(SplatfactoModel):
                 self.config.alpha_smooth_lambda
                 * self.depth_smooth_criterion(gt_bchw, alpha_bchw)
             )
-        
+
         # Gray world prior
         if self.config.use_gw_loss and step > self.config.gw_from_iter:
             if self.config.use_render_for_gw:
@@ -667,47 +690,65 @@ class SeaSplatfactoModel(SplatfactoModel):
                 gw_input = img_bchw
 
             if self.config.gw_filter_by_alpha > 0.0:
-                mask = alpha.detach().squeeze(-1) > self.config.gw_filter_by_alpha  # [H,W]
+                mask = (
+                    alpha.detach().squeeze(-1) > self.config.gw_filter_by_alpha
+                )  # [H,W]
                 # Flatten to [1, C, N] for the criterion
                 gw_input = gw_input[:, :, mask]
 
-            loss_dict["gray_world"] = self.config.gw_loss_lambda * self.gw_criterion(gw_input)
-        
+            loss_dict["gray_world"] = self.config.gw_loss_lambda * self.gw_criterion(
+                gw_input
+            )
+
         # SeaThru loss (only active after SeaThru activation)
         if seathru_forward:
-            backscatter_detach_bchw = self._to_bchw(outputs["backscatter_depth_detached"])
-            attenuation_detach_bchw = self._to_bchw(outputs["attenuation_depth_detached"])
+            backscatter_detach_bchw = self._to_bchw(
+                outputs["backscatter_depth_detached"]
+            )
+            attenuation_detach_bchw = self._to_bchw(
+                outputs["attenuation_depth_detached"]
+            )
             direct_bchw = self._to_bchw(outputs["direct"])
             backscatter_bchw = self._to_bchw(outputs["backscatter"])
-            
+
             # DCP loss (dark channel prior on estimated direct signal)
             if self.config.use_dcp_loss:
                 reverse_direct = gt_bchw.detach() - backscatter_detach_bchw
                 dcp_loss, _ = self.dcp_criterion(reverse_direct, depth_bchw.detach())
                 loss_dict["dcp"] = self.config.dcp_loss_lambda * dcp_loss
-        
+
             # RGB saturation loss
             if self.config.use_rgb_sat_loss:
-                loss_dict["rgb_sat"] = self.config.sat_loss_lambda * self.rgb_sat_criterion(img_bchw)
-    
-            
+                loss_dict["rgb_sat"] = (
+                    self.config.sat_loss_lambda * self.rgb_sat_criterion(img_bchw)
+                )
+
             # RGB spatial variation loss
             if self.config.use_rgb_sv_loss:
-                loss_dict["rgb_sv"] = 0.01 * self.rgb_sv_criterion(img_bchw.detach(), direct_bchw) # TODO: Why is 0.01 not a variable?
-            
+                loss_dict["rgb_sv"] = 0.01 * self.rgb_sv_criterion(
+                    img_bchw.detach(), direct_bchw
+                )  # TODO: Why is 0.01 not a variable?
+
             # B_inf loss
             if self.config.use_binf_loss:
-                loss_dict["binf"] = self.config.binf_loss_lambda * self.backscatter_model.forward_rgb(img_bchw.detach())
-                
-            
+                loss_dict["binf"] = (
+                    self.config.binf_loss_lambda
+                    * self.backscatter_model.forward_rgb(img_bchw.detach())
+                )
+
             # DSC attenuation loss
             if self.config.use_dsc_attenuation_loss:
                 reverse_direct_detached = (gt_bchw - backscatter_bchw).detach()
                 if self.config.disable_attenuation:
                     J = torch.zeros_like(reverse_direct_detached)
                 else:
-                    J = reverse_direct_detached / attenuation_detach_bchw.clamp(min=1e-8)
-                loss_dict["dsc_attenuation"] = self.config.dsc_attenuation_lambda * self.dsc_attenuation_criterion(reverse_direct_detached, J)
+                    J = reverse_direct_detached / attenuation_detach_bchw.clamp(
+                        min=1e-8
+                    )
+                loss_dict["dsc_attenuation"] = (
+                    self.config.dsc_attenuation_lambda
+                    * self.dsc_attenuation_criterion(reverse_direct_detached, J)
+                )
         else:
             # TODO: Compute Pre-SeaThru DCP but NOT added to loss in original SeaSplat (for logging if needed)
             pass
@@ -721,10 +762,10 @@ class SeaSplatfactoModel(SplatfactoModel):
                 loss_dict[k] = v.mean()
 
         return loss_dict
-    
+
     def get_image_metrics_and_images(
-            self, outputs: Dict[str, torch.Tensor], batch: Dict[str, torch.Tensor]
-        ) -> Tuple[Dict[str, float], Dict[str, torch.Tensor]]:
+        self, outputs: Dict[str, torch.Tensor], batch: Dict[str, torch.Tensor]
+    ) -> Tuple[Dict[str, float], Dict[str, torch.Tensor]]:
         """_summary_
 
         Args:
@@ -789,27 +830,25 @@ class SeaSplatfactoModel(SplatfactoModel):
         if "direct" in outputs:
             images_dict["direct"] = torch.clamp(outputs["direct"], 0.0, 1.0)
         if "underwater_rgb" in outputs:
-            images_dict["underwater"] = torch.clamp(
-                outputs["underwater_rgb"], 0.0, 1.0
-            )
+            images_dict["underwater"] = torch.clamp(outputs["underwater_rgb"], 0.0, 1.0)
         if "rendered_image" in outputs:
             images_dict["clean_render"] = torch.clamp(
                 outputs["rendered_image"], 0.0, 1.0
             )
 
         return metrics_dict, images_dict
-    
+
     # Helpers
     @staticmethod
     def _to_bchw(hwc: torch.Tensor) -> torch.Tensor:
         """Convert [H, W, C] to [1, C, H, W]"""
-        return hwc.permute(2, 0, 1).unsqueeze(0)    
-    
+        return hwc.permute(2, 0, 1).unsqueeze(0)
+
     @staticmethod
     def _to_hwc(bchw: torch.Tensor) -> torch.Tensor:
         """Convert [1, C, H, W] to [H, W, C]"""
         return bchw.squeeze(0).permute(1, 2, 0)
-    
+
     def _process_depth(self, depth: torch.Tensor, alpha: torch.Tensor) -> torch.Tensor:
         """Process raw expected depth from the rasterizer.
 
@@ -838,7 +877,9 @@ class SeaSplatfactoModel(SplatfactoModel):
         if not valid.all():
             valid_vals = d[valid]
             fill = valid_vals.max().item() if valid_vals.numel() > 0 else 100.0
-            d = torch.where(valid, d, torch.tensor(fill, device=d.device, dtype=d.dtype))
+            d = torch.where(
+                valid, d, torch.tensor(fill, device=d.device, dtype=d.dtype)
+            )
 
         d = d / self.config.normalize_depth
 
@@ -850,7 +891,7 @@ class SeaSplatfactoModel(SplatfactoModel):
                 d = d / d_max.clamp(min=1e-8)
 
         return d
-    
+
     def _freeze_gs_params(self, freeze: bool, colors_only: bool = False) -> None:
         """Toggle ``requires_grad`` on Gaussian parameter groups.
 
@@ -865,7 +906,7 @@ class SeaSplatfactoModel(SplatfactoModel):
                 param.requires_grad_(True)
             else:
                 param.requires_grad_(not freeze)
-                
+
     def _freeze_medium_params(self, freeze: bool) -> None:
         """Toggle ``requires_grad`` on medium model parameters."""
         if self.backscatter_model is not None:

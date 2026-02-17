@@ -8,7 +8,9 @@ from __future__ import annotations
 
 from nerfstudio.configs.base_config import ViewerConfig
 from nerfstudio.data.dataparsers.nerfstudio_dataparser import NerfstudioDataParserConfig
-from nerfstudio.data.datamanagers.full_images_datamanager import FullImageDatamanagerConfig
+from nerfstudio.data.datamanagers.full_images_datamanager import (
+    FullImageDatamanagerConfig,
+)
 from nerfstudio.pipelines.base_pipeline import VanillaPipelineConfig
 from nerfstudio.engine.optimizers import AdamOptimizerConfig, RAdamOptimizerConfig
 from nerfstudio.engine.schedulers import (
@@ -68,7 +70,8 @@ sea_splatfacto_method = MethodSpecification(
             "camera_opt": {
                 "optimizer": AdamOptimizerConfig(lr=1e-3, eps=1e-15),
                 "scheduler": ExponentialDecaySchedulerConfig(
-                    lr_final=1e-4, max_steps=30000,
+                    lr_final=1e-4,
+                    max_steps=30000,
                 ),
             },
             # SeaSplat-specific parameter groups
