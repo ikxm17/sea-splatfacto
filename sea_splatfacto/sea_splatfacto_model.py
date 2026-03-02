@@ -79,7 +79,7 @@ class SeaSplatfactoModelConfig(SplatfactoModelConfig):
     output_depth_during_training: bool = (
         True  # rendered depth is needed at every step for the medium models
     )
-    background_color: Literal["black", "white", "learned"] = (
+    background_color: Literal["black", "white", "random", "learned"] = (
         "black"  # background compositing is handled ourselves via learned_background, so the base renderer shoudl composite against black (i.e. contribute nothing)
     )
 
@@ -915,7 +915,7 @@ class SeaSplatfactoModel(SplatfactoModel):
         if self.attenuation_model is not None:
             for p in self.attenuation_model.parameters():
                 p.requires_grad_(not freeze)
-                
+
     # Callbacks
     def _seasplat_before_iteration(self, step: int) -> None:
         """BEFORE_TRAIN_ITERATION callback -- manage training phase state.
