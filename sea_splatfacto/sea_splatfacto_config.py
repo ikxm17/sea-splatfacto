@@ -25,14 +25,15 @@ from sea_splatfacto.sea_splatfacto_model import SeaSplatfactoModelConfig
 sea_splatfacto_method = MethodSpecification(
     config=TrainerConfig(
         method_name="sea-splatfacto",  # TODO: rename to your own model
-        steps_per_eval_batch=100,
+        steps_per_eval_image=100,
+        steps_per_eval_batch=0,
         steps_per_eval_all_images=0,
         steps_per_save=2000,
         max_num_iterations=30000,
         mixed_precision=False,
         pipeline=VanillaPipelineConfig(
             datamanager=FullImageDatamanagerConfig(
-                dataparser=NerfstudioDataParserConfig(),
+                dataparser=NerfstudioDataParserConfig(load_3D_points=True),
             ),
             model=SeaSplatfactoModelConfig(),
         ),
@@ -68,10 +69,21 @@ sea_splatfacto_method = MethodSpecification(
             },
             # Camera optimizer
             "camera_opt": {
-                "optimizer": AdamOptimizerConfig(lr=1e-3, eps=1e-15),
+                "optimizer": AdamOptimizerConfig(lr=1e-4, eps=1e-15),
+                "scheduler": ExponentialDecaySchedulerConfig(
+                    lr_final=5e-7,
+                    max_steps=30000,
+                    warmup_steps=1000,
+                    lr_pre_warmup=0,
+                ),
+            },
+            "bilateral_grid": {
+                "optimizer": AdamOptimizerConfig(lr=2e-3, eps=1e-15),
                 "scheduler": ExponentialDecaySchedulerConfig(
                     lr_final=1e-4,
                     max_steps=30000,
+                    warmup_steps=1000,
+                    lr_pre_warmup=0,
                 ),
             },
             # SeaSplat-specific parameter groups
