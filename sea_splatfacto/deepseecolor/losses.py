@@ -41,12 +41,12 @@ class AttenuateLoss(nn.Module):
         # ? spatial variation loss
         init_spatial = torch.std(direct, dim=[2, 3])
         channel_spatial = torch.std(J, dim=[2, 3])
-        spatial_variation_loss = self.mse((channel_spatial, init_spatial))
+        spatial_variation_loss = self.mse(channel_spatial, init_spatial)
 
         # ? intensity loss
         channel_intensities = torch.mean(J, dim=[2, 3], keepdim=True)
         intensity_loss = (
-            self.mse(channel_intensities - self.target_intensity).square().mean()
+            (channel_intensities - self.target_intensity).square().mean()
         )
 
         if torch.any(torch.isnan(saturation_loss)):
@@ -237,7 +237,7 @@ class AlphaBackgroundLoss(nn.Module):
         else:
             if len(rgb.size()) == 2:
                 diff = rgb - background
-                dist = torch.linalg.vector_norm(diff, dim=0)
+                dist = torch.linalg.vector_norm(diff, dim=1)
             else:
                 diff = rgb - background.reshape(3, 1, 1)
                 dist = torch.linalg.vector_norm(diff, dim=0)
@@ -245,14 +245,14 @@ class AlphaBackgroundLoss(nn.Module):
         # ? other approach from seasplat
         other_approach = False
         if other_approach:
-            clamped_diff = torch.max(dist - self.threshold, torch.Tensor([0, 0]).cuda())
+            clamped_diff = torch.max(dist - self.threshold, torch.Tensor([0.0]).cuda())
             if self.use_kornia:
                 mask = torch.exp(-clamped_diff / 10)  # ? what is 10
             else:
                 mask = torch.exp(-clamped_diff / 0.05)  # what is 0.05
             masked_alpha = alpha * mask
             if torch.sum(mask) == 0:
-                loss = torch.Tensor([0, 0]).squeeze().cuda()
+                loss = torch.Tensor([0.0]).squeeze().cuda()
             else:
                 loss = self.mse(masked_alpha, torch.zeros_like(masked_alpha))
 
@@ -263,7 +263,7 @@ class AlphaBackgroundLoss(nn.Module):
             else:
                 masked_alpha = alpha[:, mask]
             if torch.sum(mask) == 0:
-                loss = torch.Tensor([0, 0]).squeeze().cuda()
+                loss = torch.Tensor([0.0]).squeeze().cuda()
             else:
                 loss = self.l1_loss(masked_alpha, torch.zeros_like(masked_alpha))
         return loss
