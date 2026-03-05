@@ -338,7 +338,10 @@ class SeaSplatfactoModel(SplatfactoModel):
             return
 
         if self.adjust_gs_colors_for_color_correction:
-            # GS color-only: null out non-color GS params and medium params
+            # GS color-only: null out non-color GS params, medium params, and
+            # learned_bg.  In the reference code the `continue` at train.py:463
+            # skips both the bs/at optimizer steps AND bg_optimizer.step(),
+            # so learned_bg must not be updated during color correction either.
             for name, param in self.gauss_params.items():
                 if name not in ("features_dc", "features_rest"):
                     param.grad = None
@@ -348,6 +351,8 @@ class SeaSplatfactoModel(SplatfactoModel):
             if self.attenuation_model is not None:
                 for p in self.attenuation_model.parameters():
                     p.grad = None
+            if self.config.learn_background and isinstance(self.learned_bg, Parameter):
+                self.learned_bg.grad = None
             # Skip densification during color adjustment
             return
 
@@ -953,7 +958,7 @@ class SeaSplatfactoModel(SplatfactoModel):
             return
 
         # --- (b) SeaThru activation ---
-        if step >= self.config.seathru_from_iter and not self.seathru_active:
+        if step > self.config.seathru_from_iter and not self.seathru_active:
             self.seathru_active = True
             CONSOLE.log(f"[SeaSplat][{step}] SeaThru activated")
 
