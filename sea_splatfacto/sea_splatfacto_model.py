@@ -225,16 +225,16 @@ class SeaSplatfactoModelConfig(SplatfactoModelConfig):
     backscatter_use_residual: bool = False
     """Include the residual J_prime * exp(-β_d * z) term in the backscatter
     model (equation 10 from SeaThru)."""
-    use_at_v2: bool = False
+    use_attenuation_v2: bool = False
     """Use AttenuateNetV2 (drops some terms) instead of the default."""
-    use_at_v3: bool = True
+    use_attenuation_v3: bool = True
     """Use AttenuateNetV3 (simplest) — the default attenuation model."""
     disable_attenuation: bool = False
     """Simplified model that only accounts for backscatter (no attenuation)."""
-    update_backscatter_at_interval: int = 100
+    medium_update_interval: int = 100
     """Every this many GS training steps, perform a burst of medium-only
     updates."""
-    update_backscatter_at_count: int = 50
+    medium_update_count: int = 50
     """Number of consecutive medium-only optimizer steps per burst."""
     scale_grad_threshold: float = 1.0
     """Multiplier on the densification gradient threshold after GS parameters are unfrozen (post-SeaThru activation)."""
@@ -293,15 +293,12 @@ class SeaSplatfactoModel(SplatfactoModel):
 
         # State variables for tracking
         self.seathru_active: bool = False
-        self.backscatter_inited = False
-        self.attenuation_inited = False
-        self.backscatter_update_counter = 0
-        self.attenuation_update_counter = 0
-        self.backscatter_update_iter = 0
-        self.attenuation_update_iter = 0
+        self.medium_inited = False
+        self.medium_update_counter = 0
+        self.medium_update_iter = 0
         self.done_binf_init_with_bg = False
-        self.adjust_gs_colors_for_cc = False
-        self.update_gs_color_counter = 0
+        self.adjust_gs_colors_for_color_correction = False
+        self.gs_color_correction_counter = 0
         self._in_medium_burst: bool = False
         self._gs_frozen: bool = False
 
@@ -334,7 +331,7 @@ class SeaSplatfactoModel(SplatfactoModel):
             # Skip densification during medium bursts
             return
 
-        if self.adjust_gs_colors_for_cc:
+        if self.adjust_gs_colors_for_color_correction:
             # GS color-only: null out non-color GS params and medium params
             for name, param in self.gauss_params.items():
                 if name not in ("features_dc", "features_rest"):
@@ -483,14 +480,14 @@ class SeaSplatfactoModel(SplatfactoModel):
 
             # z-score filter
             if self.config.do_z_score:
-                d_mean = direct_bchw.mean(dim=[2, 3], keepdim=True)
-                d_std = direct_bchw.std(dim=[2, 3], keepdim=True).clamp(min=1e-8)
-                d_z = (direct_bchw - d_mean) / d_std
-                d_z_clamped = torch.clamp(d_z, -3, 3)
+                direct_mean = direct_bchw.mean(dim=[2, 3], keepdim=True)
+                direct_std = direct_bchw.std(dim=[2, 3], keepdim=True).clamp(min=1e-8)
+                direct_zscore = (direct_bchw - direct_mean) / direct_std
+                direct_zscore_clamped = torch.clamp(direct_zscore, -3, 3)
                 direct_bchw = torch.clamp(
-                    (d_z_clamped * d_std)
+                    (direct_zscore_clamped * direct_std)
                     + torch.maximum(
-                        d_mean, torch.tensor(1.0 / 255, device=self.device)
+                        direct_mean, torch.tensor(1.0 / 255, device=self.device)
                     ),
                     0,
                     1,
@@ -501,10 +498,10 @@ class SeaSplatfactoModel(SplatfactoModel):
             backscatter_detach_bchw = self.backscatter_model(depth_bchw.detach())
 
             # combined underwater image
-            uw_bchw = torch.clamp(direct_bchw + backscatter_bchw, 0.0, 1.0)
+            underwater_bchw = torch.clamp(direct_bchw + backscatter_bchw, 0.0, 1.0)
 
             # Store in outputs (HWC format)
-            outputs["underwater_rgb"] = self._to_hwc(uw_bchw)
+            outputs["underwater_rgb"] = self._to_hwc(underwater_bchw)
             outputs["direct"] = self._to_hwc(direct_bchw)
             outputs["backscatter"] = self._to_hwc(backscatter_bchw)
             outputs["attenuation_map"] = self._to_hwc(attenuation_map_bchw)
@@ -589,8 +586,8 @@ class SeaSplatfactoModel(SplatfactoModel):
 
         # Depth-weighted reconstruction L1
         if self.config.add_recon_depth_l1:
-            dl1 = depth_weighted_l1_loss(pred_image, gt_image, depth.detach())
-            loss_dict["recon_depth_l1"] = self.config.dwr_lambda * dl1
+            depth_weighted_l1 = depth_weighted_l1_loss(pred_image, gt_image, depth.detach())
+            loss_dict["recon_depth_l1"] = self.config.dwr_lambda * depth_weighted_l1
 
         # Opacity prior (mixture-of-laplacians)
         if self.config.use_opacity_prior:
@@ -610,7 +607,7 @@ class SeaSplatfactoModel(SplatfactoModel):
 
             if seathru_forward:
                 uw_chw = outputs["underwater_rgb"].permute(2, 0, 1)
-                binf_sig = torch.sigmoid(self.backscatter_model.B_inf.detach())
+                b_inf_sigmoid = torch.sigmoid(self.backscatter_model.B_inf.detach())
 
                 if (
                     self.config.alpha_binf_uw
@@ -622,25 +619,25 @@ class SeaSplatfactoModel(SplatfactoModel):
                     if self.config.alpha_binf_uw:
                         alpha_bg_loss = alpha_bg_loss + self.alpha_bg_criterion(
                             uw_chw.detach(),
-                            binf_sig.squeeze(),
+                            b_inf_sigmoid.squeeze(),
                             alpha_chw,
                         )
                     if self.config.alpha_bg_uw:
                         alpha_bg_loss = alpha_bg_loss + self.alpha_bg_criterion(
                             uw_chw.detach(),
-                            binf_sig.squeeze(),
+                            b_inf_sigmoid.squeeze(),
                             alpha_chw,
                         )
                     if self.config.alpha_binf_render:
                         alpha_bg_loss = alpha_bg_loss + self.alpha_bg_criterion(
                             rendered_image.permute(2, 0, 1).detach(),
-                            binf_sig.squeeze(),
+                            b_inf_sigmoid.squeeze(),
                             alpha_chw,
                         )
                     if self.config.alpha_bg_opacities:
                         alpha_bg_loss = alpha_bg_loss + self.alpha_bg_criterion(
                             self.colors.detach(),  # [N,3]
-                            binf_sig.squeeze(),  # [3]
+                            b_inf_sigmoid.squeeze(),  # [3]
                             torch.sigmoid(self.opacities).squeeze(),  # [N]
                         )
 
@@ -678,26 +675,26 @@ class SeaSplatfactoModel(SplatfactoModel):
         # Gray world prior
         if self.config.use_gw_loss and step > self.config.gw_from_iter:
             if self.config.use_render_for_gw:
-                gw_input = render_bchw
+                gray_world_input = render_bchw
             elif self.config.gw_detach_alpha_bg and "image_bg_detached" in outputs:
-                gw_input = self._to_bchw(outputs["image_bg_detached"])
+                gray_world_input = self._to_bchw(outputs["image_bg_detached"])
             elif self.config.gw_reverse_J and seathru_forward:
                 # J = direct.detach() / attenuation
                 direct_bchw = self._to_bchw(outputs["direct"])
-                at_bchw = self._to_bchw(outputs["attenuation_map"])
-                gw_input = direct_bchw.detach() / at_bchw.clamp(min=1e-8)
+                attenuation_bchw = self._to_bchw(outputs["attenuation_map"])
+                gray_world_input = direct_bchw.detach() / attenuation_bchw.clamp(min=1e-8)
             else:
-                gw_input = img_bchw
+                gray_world_input = img_bchw
 
             if self.config.gw_filter_by_alpha > 0.0:
                 mask = (
                     alpha.detach().squeeze(-1) > self.config.gw_filter_by_alpha
                 )  # [H,W]
                 # Flatten to [1, C, N] for the criterion
-                gw_input = gw_input[:, :, mask]
+                gray_world_input = gray_world_input[:, :, mask]
 
             loss_dict["gray_world"] = self.config.gw_loss_lambda * self.gw_criterion(
-                gw_input
+                gray_world_input
             )
 
         # SeaThru loss (only active after SeaThru activation)
@@ -935,7 +932,7 @@ class SeaSplatfactoModel(SplatfactoModel):
               - Start 1000-step medium-only warm-up burst.
           (c) After warm-up: 2000-step GS color-only adjustment.
           (d) Joint training with periodic medium bursts every
-              update_backscatter_at_interval steps.
+              medium_update_interval steps.
         """
         # --- (a) GS freeze / unfreeze ---
         # Tracked via self._gs_frozen; enforced in step_post_backward.
@@ -974,8 +971,7 @@ class SeaSplatfactoModel(SplatfactoModel):
 
             # Start initial 1000-step medium-only warm-up burst
             self._in_medium_burst = True
-            self.backscatter_update_counter = 0
-            self.attenuation_update_counter = 0
+            self.medium_update_counter = 0
 
         # --- Alternating optimization state machine ---
         # Source: train.py lines 433-463
@@ -985,42 +981,37 @@ class SeaSplatfactoModel(SplatfactoModel):
         if self._in_medium_burst:
             burst_target = (
                 1000
-                if not self.backscatter_inited
-                else self.config.update_backscatter_at_count
+                if not self.medium_inited
+                else self.config.medium_update_count
             )
 
-            if self.backscatter_update_counter >= burst_target:
+            if self.medium_update_counter >= burst_target:
                 # Burst complete
-                self.backscatter_update_counter = 0
-                self.attenuation_update_counter = 0
+                self.medium_update_counter = 0
                 self._in_medium_burst = False
 
-                if not self.backscatter_inited:
+                if not self.medium_inited:
                     CONSOLE.log(
                         f"[SeaSplat][{step}] Medium warm-up complete (1000 steps)"
                     )
-                    self.backscatter_inited = True
-                    self.attenuation_inited = True
-                    self.adjust_gs_colors_for_cc = True
+                    self.medium_inited = True
+                    self.adjust_gs_colors_for_color_correction = True
             else:
-                self.backscatter_update_counter += 1
-                self.attenuation_update_counter += 1
-                self.backscatter_update_iter += 1
-                self.attenuation_update_iter += 1
+                self.medium_update_counter += 1
+                self.medium_update_iter += 1
 
-        elif self.adjust_gs_colors_for_cc:
-            if self.update_gs_color_counter >= 2000:
+        elif self.adjust_gs_colors_for_color_correction:
+            if self.gs_color_correction_counter >= 2000:
                 CONSOLE.log(f"[SeaSplat][{step}] GS color adjustment complete")
-                self.adjust_gs_colors_for_cc = False
+                self.adjust_gs_colors_for_color_correction = False
             else:
-                self.update_gs_color_counter += 1
+                self.gs_color_correction_counter += 1
 
         else:
             # Normal joint training -- check if periodic burst should start
             if (
-                self.backscatter_inited
-                and step % self.config.update_backscatter_at_interval == 0
+                self.medium_inited
+                and step % self.config.medium_update_interval == 0
             ):
                 self._in_medium_burst = True
-                self.backscatter_update_counter = 0
-                self.attenuation_update_counter = 0
+                self.medium_update_counter = 0
