@@ -74,7 +74,7 @@ class DarkChannelPriorLossV3(nn.Module):
         """
         super().__init__()
         self.l1_loss = nn.L1Loss()
-        self.smooth_l1_loss = nn.SmoothL1Loss(beta=0.1)  # TODO: make beta a parameter
+        self.smooth_l1_loss = nn.SmoothL1Loss(beta=0.2)
         self.mse = nn.MSELoss()
         self.relu = nn.ReLU()
         self.cost_ratio = cost_ratio
@@ -161,6 +161,9 @@ class SmoothDepthLoss(nn.Module):
             rgb.diff(dim=-2), dim=-3, keepdim=True
         )  # calculate mean of difference across vertical dimension (H) over all color channels; shape: B x 1 x (H-1) x W
 
+        depth_dx *= torch.exp(-rgb_dx)
+        depth_dy *= torch.exp(-rgb_dy)
+
         return torch.abs(depth_dx).mean() + torch.abs(depth_dy).mean()
 
 
@@ -218,7 +221,8 @@ class AlphaBackgroundLoss(nn.Module):
     def __init__(self, use_kornia: bool = False):
         super().__init__()
         self.use_kornia = use_kornia
-        self.l1_loss = nn.L1Loss()
+        self.mse = nn.MSELoss()
+        self.l1 = nn.L1Loss()
         if use_kornia:
             self.range = math.sqrt(
                 100 * 100 + 255 * 255 + 255 * 255
@@ -265,7 +269,7 @@ class AlphaBackgroundLoss(nn.Module):
             if torch.sum(mask) == 0:
                 loss = torch.Tensor([0.0]).squeeze().cuda()
             else:
-                loss = self.l1_loss(masked_alpha, torch.zeros_like(masked_alpha))
+                loss = self.l1(masked_alpha, torch.zeros_like(masked_alpha))
         return loss
 
 
