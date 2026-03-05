@@ -82,6 +82,12 @@ class SeaSplatfactoModelConfig(SplatfactoModelConfig):
     background_color: Literal["black", "white", "random", "learned"] = (
         "black"  # background compositing is handled ourselves via learned_background, so the base renderer shoudl composite against black (i.e. contribute nothing)
     )
+    sh_degree: int = 0
+    """SeaSplat uses SH degree 0 (no view-dependent color)."""
+    densify_grad_thresh: float = 0.0002
+    """SeaSplat uses the original 3DGS densification gradient threshold."""
+    use_absgrad: bool = False
+    """SeaSplat uses original 3DGS-style gradients (not absgrad)."""
 
     # Gaussian Splatting behavior
     do_isotropic: bool = False
