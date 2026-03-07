@@ -42,6 +42,7 @@ class BackscatterNetV2(nn.Module):
             self.backscatter_conv_params = nn.Parameter(torch.rand(3, 1, 1, 1))
 
         self.B_inf = nn.Parameter(torch.rand(3, 1, 1))
+        self.l2 = nn.MSELoss()
 
         if use_residual:
             self.residual_conv_params = nn.Parameter(torch.rand(3, 1, 1, 1))
@@ -88,7 +89,7 @@ class BackscatterNetV2(nn.Module):
         return backscatter
 
     def forward_rgb(self, rgb):
-        from utils.uw_utils import estimate_atmospheric_light
+        from sea_splatfacto.utils.uw_utils import estimate_atmospheric_light
         
         atmospheric_colors = list()
         for rgb_image in rgb:

@@ -24,7 +24,7 @@ from sea_splatfacto.sea_splatfacto_model import SeaSplatfactoModelConfig
 
 sea_splatfacto_method = MethodSpecification(
     config=TrainerConfig(
-        method_name="sea-splatfacto",  # TODO: rename to your own model
+        method_name="sea-splatfacto",
         steps_per_eval_image=100,
         steps_per_eval_batch=0,
         steps_per_eval_all_images=0,
@@ -38,7 +38,6 @@ sea_splatfacto_method = MethodSpecification(
             model=SeaSplatfactoModelConfig(),
         ),
         optimizers={
-            # TODO: consider changing optimizers depending on your custom method
             # Gaussian parameters
             "means": {
                 "optimizer": AdamOptimizerConfig(lr=1.6e-4, eps=1e-15),

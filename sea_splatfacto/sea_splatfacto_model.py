@@ -200,6 +200,8 @@ class SeaSplatfactoModelConfig(SplatfactoModelConfig):
     # RGB spatial variation loss
     use_rgb_sv_loss: bool = False
     """Ensure the restored image has similar spatial variation to the input (from DeepSeeColor)."""
+    rgb_sv_lambda: float = 0.01
+    """Weight for the RGB spatial variation loss."""
 
     # B_inf loss
     use_binf_loss: bool = False
@@ -260,8 +262,6 @@ class SeaSplatfactoModel(SplatfactoModel):
     def populate_modules(self):
         super().populate_modules()
 
-        # TODO: Override any potential functions/methods to implement your own method
-        # or subclass from "Model" and define all mandatory fields.
         self.backscatter_model: Optional[BackscatterNetV2] = None
         self.attenuation_model: Optional[AttenuateNetV3] = None
 
@@ -275,6 +275,7 @@ class SeaSplatfactoModel(SplatfactoModel):
             self.attenuation_model = AttenuateNetV3(
                 scale=self.config.attenuation_scale,
                 do_sigmoid=self.config.attenuation_do_sigmoid,
+                init_vals=not self.config.attenuation_do_sigmoid,
             )
 
         # Learn background
@@ -733,9 +734,9 @@ class SeaSplatfactoModel(SplatfactoModel):
 
             # RGB spatial variation loss
             if self.config.use_rgb_sv_loss:
-                loss_dict["rgb_sv"] = 0.01 * self.rgb_sv_criterion(
+                loss_dict["rgb_sv"] = self.config.rgb_sv_lambda * self.rgb_sv_criterion(
                     img_bchw.detach(), direct_bchw
-                )  # TODO: Why is 0.01 not a variable?
+                )
 
             # B_inf loss
             if self.config.use_binf_loss:
