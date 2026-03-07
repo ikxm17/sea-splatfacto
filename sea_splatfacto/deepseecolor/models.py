@@ -69,7 +69,8 @@ class BackscatterNetV2(nn.Module):
             )
 
         # backscatter model: B(depth) = B_inf * (1 - exp(-beta_b * depth))
-        backscatter = torch.sigmoid(self.B_inf) * (1 - torch.exp(-beta_b_conv * depth))
+        # beta_b_conv = conv2d(depth, params) already equals β·z; do NOT multiply by depth again
+        backscatter = torch.sigmoid(self.B_inf) * (1 - torch.exp(-beta_b_conv))
 
         # ? What is this part doing?
         if self.use_residual:
@@ -149,6 +150,7 @@ class AttenuateNetV3(nn.Module):
             )
 
         # attenuation model: exp(-beta_d * depth)
-        attenuation = torch.exp(-beta_d_conv * depth)
+        # beta_d_conv = conv2d(depth, params) already equals β·z; do NOT multiply by depth again
+        attenuation = torch.exp(-beta_d_conv)
 
         return attenuation
