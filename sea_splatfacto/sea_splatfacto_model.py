@@ -310,8 +310,8 @@ class SeaSplatfactoModel(SplatfactoModel):
         self._gs_frozen: bool = False
 
         CONSOLE.log(
-            f"[SeaSplat] do_seathru: {self.config.do_seathru}, "
-            f"seathru_from_iter: {self.config.seathru_from_iter},"
+            f"[INFO] do_seathru: {self.config.do_seathru}, "
+            f"seathru_from_iter: {self.config.seathru_from_iter}, "
             f"disable_attenuation: {self.config.disable_attenuation}"
         )
 
@@ -772,7 +772,7 @@ class SeaSplatfactoModel(SplatfactoModel):
         for k, v in loss_dict.items():
             if isinstance(v, torch.Tensor) and v.dim() != 0:
                 CONSOLE.log(
-                    f"[SeaSplat] WARNING: loss '{k}' is non-scalar "
+                    f"[WARNING] loss '{k}' is non-scalar "
                     f"(shape={v.shape}), reducing with .mean()"
                 )
                 loss_dict[k] = v.mean()
@@ -956,10 +956,10 @@ class SeaSplatfactoModel(SplatfactoModel):
         # --- (a) GS freeze / unfreeze ---
         # Tracked via self._gs_frozen; enforced in step_post_backward.
         if step == self.config.freeze_gs_from_iter:
-            CONSOLE.log(f"[SeaSplat][{step}] Freezing GS params (except colors)")
+            CONSOLE.log(f"[INFO] [Step {step}] Freezing GS params (except colors)")
             self._gs_frozen = True
         if step == self.config.unfreeze_gs_from_iter:
-            CONSOLE.log(f"[SeaSplat][{step}] Unfreezing GS params")
+            CONSOLE.log(f"[INFO] [Step {step}] Unfreezing GS params")
             self._gs_frozen = False
 
         if not self.config.do_seathru:
@@ -968,7 +968,7 @@ class SeaSplatfactoModel(SplatfactoModel):
         # --- (b) SeaThru activation ---
         if step > self.config.seathru_from_iter and not self.seathru_active:
             self.seathru_active = True
-            CONSOLE.log(f"[SeaSplat][{step}] SeaThru activated")
+            CONSOLE.log(f"[INFO] [Step {step}] SeaThru activated")
 
             # Initialize B_inf from learned_bg
             # Source: train.py lines 208-212
@@ -984,7 +984,7 @@ class SeaSplatfactoModel(SplatfactoModel):
                     )
                 self.done_binf_init_with_bg = True
                 CONSOLE.log(
-                    f"[SeaSplat][{step}] B_inf initialized from learned_bg = "
+                    f"[INFO] [Step {step}] B_inf initialized from learned_bg = "
                     f"{torch.sigmoid(self.learned_bg).tolist()}"
                 )
 
@@ -1011,7 +1011,7 @@ class SeaSplatfactoModel(SplatfactoModel):
 
                 if not self.medium_inited:
                     CONSOLE.log(
-                        f"[SeaSplat][{step}] Medium warm-up complete (1000 steps)"
+                        f"[INFO] [Step {step}] Medium warm-up complete (1000 steps)"
                     )
                     self.medium_inited = True
                     self.adjust_gs_colors_for_color_correction = True
@@ -1021,7 +1021,7 @@ class SeaSplatfactoModel(SplatfactoModel):
 
         elif self.adjust_gs_colors_for_color_correction:
             if self.gs_color_correction_counter >= 2000:
-                CONSOLE.log(f"[SeaSplat][{step}] GS color adjustment complete")
+                CONSOLE.log(f"[INFO] [Step {step}] GS color adjustment complete")
                 self.adjust_gs_colors_for_color_correction = False
             else:
                 self.gs_color_correction_counter += 1
