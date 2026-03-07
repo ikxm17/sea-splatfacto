@@ -339,13 +339,9 @@ class SeaSplatfactoModel(SplatfactoModel):
             return
 
         if self.adjust_gs_colors_for_color_correction:
-            # GS color-only: null out non-color GS params, medium params, and
-            # learned_bg.  In the reference code the `continue` at train.py:463
-            # skips both the bs/at optimizer steps AND bg_optimizer.step(),
-            # so learned_bg must not be updated during color correction either.
-            for name, param in self.gauss_params.items():
-                if name not in ("features_dc", "features_rest"):
-                    param.grad = None
+            # CC phase: all GS params update, but medium + bg are frozen.
+            # Reference: gaussians.optimizer.step() runs fully; `continue`
+            # at train.py:463 skips bs/at optimizer steps AND bg_optimizer.step().
             if self.backscatter_model is not None:
                 for p in self.backscatter_model.parameters():
                     p.grad = None
@@ -354,7 +350,7 @@ class SeaSplatfactoModel(SplatfactoModel):
                     p.grad = None
             if self.config.learn_background and isinstance(self.learned_bg, Parameter):
                 self.learned_bg.grad = None
-            # Skip densification during color adjustment
+            # Skip densification during color correction
             return
 
         if self._gs_frozen:
@@ -365,6 +361,17 @@ class SeaSplatfactoModel(SplatfactoModel):
                     param.grad = None
             # Still skip densification when GS is frozen
             return
+
+        # Normal joint training: null medium gradients so optimizer.step() is a no-op
+        # for medium params.  Reference: bs/at optimizers only step inside burst windows.
+        if self.seathru_active and self.medium_inited:
+            CONSOLE.log(f"[DEBUG] [Step {step}] Nulling medium grads (normal joint training)")
+            if self.backscatter_model is not None:
+                for p in self.backscatter_model.parameters():
+                    p.grad = None
+            if self.attenuation_model is not None:
+                for p in self.attenuation_model.parameters():
+                    p.grad = None
 
         # Normal operation -- run Splatfacto's strategy (densification/pruning)
         super().step_post_backward(step)
