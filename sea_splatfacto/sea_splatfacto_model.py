@@ -88,6 +88,10 @@ class SeaSplatfactoModelConfig(SplatfactoModelConfig):
     """SeaSplat uses the original 3DGS densification gradient threshold."""
     use_absgrad: bool = False
     """SeaSplat uses original 3DGS-style gradients (not absgrad)."""
+    cull_alpha_thresh: float = 0.005
+    """Lower cull threshold; splatfacto's 0.1 is too aggressive for underwater scenes."""
+    num_downscales: int = 0
+    """No resolution downscaling; train at full resolution from step 1."""
 
     # Gaussian Splatting behavior
     do_isotropic: bool = False
