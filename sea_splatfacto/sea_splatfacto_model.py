@@ -358,8 +358,8 @@ class SeaSplatfactoModel(SplatfactoModel):
             return
 
         if self._gs_frozen:
-            # Config-driven GS freeze: null out all GS grads except colors
-            # Source: train.py lines 174-192
+            # GS freeze: null out all GS grads except colors
+            # Source: train.py lines 174-192 (config-driven + seathru activation)
             for name, param in self.gauss_params.items():
                 if name not in ("features_dc", "features_rest"):
                     param.grad = None
@@ -951,6 +951,7 @@ class SeaSplatfactoModel(SplatfactoModel):
         Phases (source: train.py lines 174-192, 430-463):
           (a) GS freeze / unfreeze at configurable iterations.
           (b) SeaThru activation at seathru_from_iter:
+              - Freeze GS params (except colors) for 1 iteration.
               - Initialize B_inf from learned_bg.
               - Start 1000-step medium-only warm-up burst.
           (c) After warm-up: 2000-step GS color-only adjustment.
@@ -972,7 +973,11 @@ class SeaSplatfactoModel(SplatfactoModel):
         # --- (b) SeaThru activation ---
         if step > self.config.seathru_from_iter and not self.seathru_active:
             self.seathru_active = True
-            CONSOLE.log(f"[INFO] [Step {step}] SeaThru activated")
+            self._gs_frozen = True
+            CONSOLE.log(
+                f"[INFO] [Step {step}] SeaThru activated; "
+                "GS frozen (except colors) for 1 iter"
+            )
 
             # Initialize B_inf from learned_bg
             # Source: train.py lines 208-212
@@ -995,6 +1000,12 @@ class SeaSplatfactoModel(SplatfactoModel):
             # Start initial 1000-step medium-only warm-up burst
             self._in_medium_burst = True
             self.medium_update_counter = 0
+
+        # Unfreeze GS 1 step after seathru activation
+        # Source: train.py lines 190-192
+        if step == self.config.seathru_from_iter + 2 and self._gs_frozen:
+            self._gs_frozen = False
+            CONSOLE.log(f"[INFO] [Step {step}] Unfreezing GS params (seathru +2)")
 
         # --- Alternating optimization state machine ---
         # Source: train.py lines 433-463
