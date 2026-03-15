@@ -244,10 +244,14 @@ class SeaSplatfactoModelConfig(SplatfactoModelConfig):
     disable_attenuation: bool = False
     """Simplified model that only accounts for backscatter (no attenuation)."""
     medium_update_interval: int = 100
-    """Every this many GS training steps, perform a burst of medium-only
-    updates."""
+    """Interleaved medium step frequency: every this many iterations during
+    Phase 3 joint training, one step updates medium models while GS is
+    frozen.  Reference: train.py:434 — medium optimizers step once every
+    update_bs_at_interval iterations, not in consecutive bursts."""
     medium_update_count: int = 50
-    """Number of consecutive medium-only optimizer steps per burst."""
+    """Cycle length for interleaved medium updates (reference: resets counter
+    every this many medium steps).  Functionally a no-op after init — kept
+    for reference parity."""
     scale_grad_threshold: float = 1.0
     """Multiplier on the densification gradient threshold after GS parameters are unfrozen (post-SeaThru activation)."""
     do_z_score: bool = False
@@ -366,16 +370,30 @@ class SeaSplatfactoModel(SplatfactoModel):
             # Still skip densification when GS is frozen
             return
 
-        # Normal joint training: null medium gradients so optimizer.step() is a no-op
-        # for medium params.  Reference: bs/at optimizers only step inside burst windows.
+        # Phase 3 joint training: interleaved GS and medium steps.
+        # Reference (train.py:434): medium optimizers step ONCE every
+        # update_bs_at_interval iterations (with `continue` to skip GS).
+        # On all other iterations, GS optimizer steps normally.
         if self.seathru_active and self.medium_inited:
-            CONSOLE.log(f"[DEBUG] [Step {step}] Nulling medium grads (normal joint training)")
-            if self.backscatter_model is not None:
-                for p in self.backscatter_model.parameters():
-                    p.grad = None
-            if self.attenuation_model is not None:
-                for p in self.attenuation_model.parameters():
-                    p.grad = None
+            if step % self.config.medium_update_interval == 0:
+                # Interleaved medium step: null GS + bg grads, medium updates
+                for param in self.gauss_params.values():
+                    param.grad = None
+                if self.config.learn_background and isinstance(
+                    self.learned_bg, Parameter
+                ):
+                    self.learned_bg.grad = None
+                self.medium_update_iter += 1
+                # Skip densification (reference: `continue` skips everything)
+                return
+            else:
+                # Normal GS step: null medium grads
+                if self.backscatter_model is not None:
+                    for p in self.backscatter_model.parameters():
+                        p.grad = None
+                if self.attenuation_model is not None:
+                    for p in self.attenuation_model.parameters():
+                        p.grad = None
 
         # Normal operation -- run Splatfacto's strategy (densification/pruning)
         super().step_post_backward(step)
@@ -955,8 +973,9 @@ class SeaSplatfactoModel(SplatfactoModel):
               - Initialize B_inf from learned_bg.
               - Start 1000-step medium-only warm-up burst.
           (c) After warm-up: 2000-step GS color-only adjustment.
-          (d) Joint training with periodic medium bursts every
-              medium_update_interval steps.
+          (d) Joint training with interleaved medium steps every
+              medium_update_interval iterations (handled in
+              step_post_backward, not here).
         """
         # --- (a) GS freeze / unfreeze ---
         # Tracked via self._gs_frozen; enforced in step_post_backward.
@@ -1013,23 +1032,17 @@ class SeaSplatfactoModel(SplatfactoModel):
             return
 
         if self._in_medium_burst:
-            burst_target = (
-                1000
-                if not self.medium_inited
-                else self.config.medium_update_count
-            )
-
-            if self.medium_update_counter >= burst_target:
-                # Burst complete
+            # Initial warm-up burst only (1000 consecutive medium-only steps).
+            # Periodic Phase 3 updates are interleaved, not bursted — handled
+            # in step_post_backward().
+            if self.medium_update_counter >= 1000:
                 self.medium_update_counter = 0
                 self._in_medium_burst = False
-
-                if not self.medium_inited:
-                    CONSOLE.log(
-                        f"[INFO] [Step {step}] Medium warm-up complete (1000 steps)"
-                    )
-                    self.medium_inited = True
-                    self.adjust_gs_colors_for_color_correction = True
+                CONSOLE.log(
+                    f"[INFO] [Step {step}] Medium warm-up complete (1000 steps)"
+                )
+                self.medium_inited = True
+                self.adjust_gs_colors_for_color_correction = True
             else:
                 self.medium_update_counter += 1
                 self.medium_update_iter += 1
@@ -1042,10 +1055,8 @@ class SeaSplatfactoModel(SplatfactoModel):
                 self.gs_color_correction_counter += 1
 
         else:
-            # Normal joint training -- check if periodic burst should start
-            if (
-                self.medium_inited
-                and step % self.config.medium_update_interval == 0
-            ):
-                self._in_medium_burst = True
-                self.medium_update_counter = 0
+            # Normal joint training — interleaved medium steps handled
+            # in step_post_backward() (1 medium step every
+            # medium_update_interval iterations, matching reference
+            # train.py:434).
+            pass
