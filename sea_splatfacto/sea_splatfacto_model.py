@@ -334,6 +334,10 @@ class SeaSplatfactoModel(SplatfactoModel):
         call ``.retain_grad()``.  Instead we null out ``.grad`` after
         backward -- Adam skips any parameter whose ``.grad`` is ``None``.
 
+        Phase 2 (CC) interleaves medium optimizer steps every
+        ``medium_update_interval`` iterations to keep medium models warm,
+        matching the reference behavior (train.py:434-463).
+
         Source: train.py lines 430-463 (alternating optimization),
                 train.py lines 516-557 (densification -- skipped when frozen).
         """
@@ -347,17 +351,27 @@ class SeaSplatfactoModel(SplatfactoModel):
             return
 
         if self.adjust_gs_colors_for_color_correction:
-            # CC phase: all GS params update, but medium + bg are frozen.
-            # Reference: gaussians.optimizer.step() runs fully; `continue`
-            # at train.py:463 skips bs/at optimizer steps AND bg_optimizer.step().
-            if self.backscatter_model is not None:
-                for p in self.backscatter_model.parameters():
-                    p.grad = None
-            if self.attenuation_model is not None:
-                for p in self.attenuation_model.parameters():
-                    p.grad = None
-            if self.config.learn_background and isinstance(self.learned_bg, Parameter):
-                self.learned_bg.grad = None
+            # CC phase: primarily GS color adjustment, but medium models get
+            # an interleaved update every medium_update_interval steps to stay
+            # warm (reference: train.py:434-463 — the `iteration %
+            # update_bs_at_interval == 0` check runs during CC too).
+            if step % self.config.medium_update_interval == 0:
+                # Interleaved medium step during CC: null GS + bg grads
+                for param in self.gauss_params.values():
+                    param.grad = None
+                if self.config.learn_background and isinstance(self.learned_bg, Parameter):
+                    self.learned_bg.grad = None
+                self.medium_update_iter += 1
+            else:
+                # Normal CC step: GS updates, medium + bg frozen
+                if self.backscatter_model is not None:
+                    for p in self.backscatter_model.parameters():
+                        p.grad = None
+                if self.attenuation_model is not None:
+                    for p in self.attenuation_model.parameters():
+                        p.grad = None
+                if self.config.learn_background and isinstance(self.learned_bg, Parameter):
+                    self.learned_bg.grad = None
             # Skip densification during color correction
             return
 
@@ -972,7 +986,8 @@ class SeaSplatfactoModel(SplatfactoModel):
               - Freeze GS params (except colors) for 1 iteration.
               - Initialize B_inf from learned_bg.
               - Start 1000-step medium-only warm-up burst.
-          (c) After warm-up: 2000-step GS color-only adjustment.
+          (c) After warm-up: ~2000-step GS color adjustment with interleaved
+              medium steps every medium_update_interval iterations.
           (d) Joint training with interleaved medium steps every
               medium_update_interval iterations (handled in
               step_post_backward, not here).
@@ -1051,6 +1066,9 @@ class SeaSplatfactoModel(SplatfactoModel):
             if self.gs_color_correction_counter >= 2000:
                 CONSOLE.log(f"[INFO] [Step {step}] GS color adjustment complete")
                 self.adjust_gs_colors_for_color_correction = False
+            elif step % self.config.medium_update_interval == 0:
+                # Interleaved medium step — don't count toward CC progress
+                pass
             else:
                 self.gs_color_correction_counter += 1
 
