@@ -169,12 +169,6 @@ class SeaSplatfactoModelConfig(SplatfactoModelConfig):
     opacity_prior_lambda: float = 0.0001
     """Weight for the opacity prior loss."""
 
-    # Depth smoothness loss
-    use_depth_smooth_loss: bool = True
-    """Edge-aware depth smoothness loss weighted by RGB gradients."""
-    depth_smooth_lambda: float = 2.0
-    """Weight for depth smoothness loss."""
-
     # Depth-weighted reconstruction loss
     add_recon_depth_l1: bool = True
     """Add a depth-weighted L1 reconstruction loss."""
@@ -262,10 +256,6 @@ class SeaSplatfactoModelConfig(SplatfactoModelConfig):
     Phase 3 joint training, one step updates medium models while GS is
     frozen.  Reference: train.py:434 — medium optimizers step once every
     update_bs_at_interval iterations, not in consecutive bursts."""
-    medium_update_count: int = 50
-    """Cycle length for interleaved medium updates (reference: resets counter
-    every this many medium steps).  Functionally a no-op after init — kept
-    for reference parity."""
     medium_warmup_steps: int = 1000
     """Number of consecutive medium-only steps in the warm-up burst (Phase 1)."""
     cc_phase_steps: int = 2000
@@ -319,7 +309,6 @@ class SeaSplatfactoModel(SplatfactoModel):
         self.depth_smooth_criterion = SmoothDepthLoss()
         self.gw_criterion = GrayWorldPriorLoss()
         self.rgb_sv_criterion = RGBSpatialVariationLoss()
-        self.rgb_01_criterion = RGBSaturationLoss(saturation_val=1.0)
         self.rgb_sat_criterion = RGBSaturationLoss(saturation_val=self.config.saturation_threshold)
         self.alpha_bg_criterion = AlphaBackgroundLoss(use_kornia=self.config.use_lab)
         self.dsc_attenuation_criterion = AttenuateLoss()
@@ -331,8 +320,8 @@ class SeaSplatfactoModel(SplatfactoModel):
         # State variables for tracking
         self.seathru_active: bool = False
         self.medium_inited = False
-        self.medium_update_counter = 0
-        self.medium_update_iter = 0
+        self.warmup_counter = 0
+        self.medium_steps_total = 0
         self.done_binf_init_with_bg = False
         self.adjust_gs_colors_for_color_correction = False
         self.gs_color_correction_counter = 0
@@ -383,7 +372,7 @@ class SeaSplatfactoModel(SplatfactoModel):
                     param.grad = None
                 if self.config.learn_background and isinstance(self.learned_bg, Parameter):
                     self.learned_bg.grad = None
-                self.medium_update_iter += 1
+                self.medium_steps_total += 1
             else:
                 # Normal CC step: GS updates, medium + bg frozen
                 if self.backscatter_model is not None:
@@ -419,7 +408,7 @@ class SeaSplatfactoModel(SplatfactoModel):
                     self.learned_bg, Parameter
                 ):
                     self.learned_bg.grad = None
-                self.medium_update_iter += 1
+                self.medium_steps_total += 1
                 # Skip densification (reference: `continue` skips everything)
                 return
             else:
@@ -1055,7 +1044,7 @@ class SeaSplatfactoModel(SplatfactoModel):
 
             # Start initial 1000-step medium-only warm-up burst
             self._in_medium_burst = True
-            self.medium_update_counter = 0
+            self.warmup_counter = 0
 
         # Unfreeze GS 1 step after seathru activation
         # Source: train.py lines 190-192
@@ -1072,8 +1061,8 @@ class SeaSplatfactoModel(SplatfactoModel):
             # Initial warm-up burst only (1000 consecutive medium-only steps).
             # Periodic Phase 3 updates are interleaved, not bursted — handled
             # in step_post_backward().
-            if self.medium_update_counter >= self.config.medium_warmup_steps:
-                self.medium_update_counter = 0
+            if self.warmup_counter >= self.config.medium_warmup_steps:
+                self.warmup_counter = 0
                 self._in_medium_burst = False
                 CONSOLE.log(
                     f"[INFO] [Step {step}] Medium warm-up complete ({self.config.medium_warmup_steps} steps)"
@@ -1081,8 +1070,8 @@ class SeaSplatfactoModel(SplatfactoModel):
                 self.medium_inited = True
                 self.adjust_gs_colors_for_color_correction = True
             else:
-                self.medium_update_counter += 1
-                self.medium_update_iter += 1
+                self.warmup_counter += 1
+                self.medium_steps_total += 1
 
         elif self.adjust_gs_colors_for_color_correction:
             if self.gs_color_correction_counter >= self.config.cc_phase_steps:
