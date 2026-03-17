@@ -110,6 +110,12 @@ class SeaSplatfactoModelConfig(SplatfactoModelConfig):
     # Learned background
     learn_background: bool = True
     """Learn a background color composited via alpha: image = render + sigmoid(background) * (1 - alpha)."""
+    bg_init_r: float = 0.05
+    """Initial red channel value for learned background (before inverse-sigmoid)."""
+    bg_init_g: float = 0.25
+    """Initial green channel value for learned background."""
+    bg_init_b: float = 0.80
+    """Initial blue channel value for learned background."""
     bg_lambda: float = 0.01
     """Weight for the alpha-background loss."""
     add_bg_binf: bool = False
@@ -136,6 +142,8 @@ class SeaSplatfactoModelConfig(SplatfactoModelConfig):
     """Swap out rendered depth with pseudo ground-truth depth maps."""
     use_depth_l1_loss: bool = False
     """Use L1 loss between rendered depth and GT depth."""
+    depth_l1_lambda: float = 0.1
+    """Weight for the depth L1 loss (rendered vs GT depth)."""
     use_depth_smooth_loss: bool = True
     """Edge-aware depth smootheness loss weighted by RGB gradients."""
     depth_smooth_lambda: float = 2.0
@@ -178,12 +186,18 @@ class SeaSplatfactoModelConfig(SplatfactoModelConfig):
     """Dark channel prior loss — encourages haze-free direct signal."""
     dcp_loss_lambda: float = 1.0
     """Weight for DCP loss."""
+    dcp_cost_ratio: float = 1000.0
+    """Ratio of negative-to-positive penalty in DarkChannelPriorLossV3."""
+    dcp_smooth_l1_beta: float = 0.2
+    """Beta (transition point) for the SmoothL1Loss in DarkChannelPriorLossV3."""
 
     # RGB saturation loss
     use_rgb_sat_loss: bool = True
     """Penalize rendered pixel values outside [0, saturation_val]."""
     sat_loss_lambda: float = 2.0
     """Weight for the RGB saturation loss."""
+    saturation_threshold: float = 0.7
+    """Saturation value for RGBSaturationLoss — pixels beyond this are penalized."""
 
     # Gray world prior loss
     use_gw_loss: bool = True
@@ -252,6 +266,10 @@ class SeaSplatfactoModelConfig(SplatfactoModelConfig):
     """Cycle length for interleaved medium updates (reference: resets counter
     every this many medium steps).  Functionally a no-op after init — kept
     for reference parity."""
+    medium_warmup_steps: int = 1000
+    """Number of consecutive medium-only steps in the warm-up burst (Phase 1)."""
+    cc_phase_steps: int = 2000
+    """Number of GS color-correction steps in Phase 2 (excludes interleaved medium steps)."""
     scale_grad_threshold: float = 1.0
     """Multiplier on the densification gradient threshold after GS parameters are unfrozen (post-SeaThru activation)."""
     do_z_score: bool = False
@@ -288,10 +306,11 @@ class SeaSplatfactoModel(SplatfactoModel):
 
         # Learn background
         if self.config.learn_background:
-            bg_init = torch.zeros(3)
-            bg_init[0] = 0.05  # R - low initial value
-            bg_init[1] = 0.25  # G - medium initial value
-            bg_init[2] = 0.80  # B - high iniital value
+            bg_init = torch.tensor([
+                self.config.bg_init_r,
+                self.config.bg_init_g,
+                self.config.bg_init_b,
+            ])
             self.learned_bg = torch.nn.Parameter(inverse_sigmoid(bg_init))
         else:
             self.register_buffer("learned_bg", torch.zeros(3))
@@ -301,10 +320,13 @@ class SeaSplatfactoModel(SplatfactoModel):
         self.gw_criterion = GrayWorldPriorLoss()
         self.rgb_sv_criterion = RGBSpatialVariationLoss()
         self.rgb_01_criterion = RGBSaturationLoss(saturation_val=1.0)
-        self.rgb_sat_criterion = RGBSaturationLoss(saturation_val=0.7)
+        self.rgb_sat_criterion = RGBSaturationLoss(saturation_val=self.config.saturation_threshold)
         self.alpha_bg_criterion = AlphaBackgroundLoss(use_kornia=self.config.use_lab)
         self.dsc_attenuation_criterion = AttenuateLoss()
-        self.dcp_criterion = DarkChannelPriorLossV3()
+        self.dcp_criterion = DarkChannelPriorLossV3(
+            cost_ratio=self.config.dcp_cost_ratio,
+            beta=self.config.dcp_smooth_l1_beta,
+        )
 
         # State variables for tracking
         self.seathru_active: bool = False
@@ -711,7 +733,7 @@ class SeaSplatfactoModel(SplatfactoModel):
         # Depth L1 loss vs GT depth
         if self.config.use_depth_l1_loss and "depth_image" in batch:
             gt_depth = batch["depth_image"].to(self.device)  # [H,W,1]
-            loss_dict["depth_l1"] = 0.1 * torch.abs(depth - gt_depth).mean()
+            loss_dict["depth_l1"] = self.config.depth_l1_lambda * torch.abs(depth - gt_depth).mean()
 
         # Depth smoothness loss (edge-aware)
         if self.config.use_depth_smooth_loss:
@@ -1050,11 +1072,11 @@ class SeaSplatfactoModel(SplatfactoModel):
             # Initial warm-up burst only (1000 consecutive medium-only steps).
             # Periodic Phase 3 updates are interleaved, not bursted — handled
             # in step_post_backward().
-            if self.medium_update_counter >= 1000:
+            if self.medium_update_counter >= self.config.medium_warmup_steps:
                 self.medium_update_counter = 0
                 self._in_medium_burst = False
                 CONSOLE.log(
-                    f"[INFO] [Step {step}] Medium warm-up complete (1000 steps)"
+                    f"[INFO] [Step {step}] Medium warm-up complete ({self.config.medium_warmup_steps} steps)"
                 )
                 self.medium_inited = True
                 self.adjust_gs_colors_for_color_correction = True
@@ -1063,7 +1085,7 @@ class SeaSplatfactoModel(SplatfactoModel):
                 self.medium_update_iter += 1
 
         elif self.adjust_gs_colors_for_color_correction:
-            if self.gs_color_correction_counter >= 2000:
+            if self.gs_color_correction_counter >= self.config.cc_phase_steps:
                 CONSOLE.log(f"[INFO] [Step {step}] GS color adjustment complete")
                 self.adjust_gs_colors_for_color_correction = False
             elif step % self.config.medium_update_interval == 0:

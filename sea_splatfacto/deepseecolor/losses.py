@@ -66,15 +66,16 @@ class DarkChannelPriorLossV3(nn.Module):
         nn (_type_): _description_
     """
 
-    def __init__(self, cost_ratio: float = 1000.0):
+    def __init__(self, cost_ratio: float = 1000.0, beta: float = 0.2):
         """_summary_
 
         Args:
             cost_ratio (float, optional): _description_. Defaults to 1000.0.
+            beta (float, optional): _description_. Defaults to 0.2.
         """
         super().__init__()
         self.l1_loss = nn.L1Loss()
-        self.smooth_l1_loss = nn.SmoothL1Loss(beta=0.2)
+        self.smooth_l1_loss = nn.SmoothL1Loss(beta=beta)
         self.mse = nn.MSELoss()
         self.relu = nn.ReLU()
         self.cost_ratio = cost_ratio
