@@ -33,7 +33,11 @@ sea_splatfacto_method = MethodSpecification(
         mixed_precision=False,
         pipeline=VanillaPipelineConfig(
             datamanager=FullImageDatamanagerConfig(
-                dataparser=NerfstudioDataParserConfig(load_3D_points=True),
+                dataparser=NerfstudioDataParserConfig(
+                    load_3D_points=True,
+                    eval_mode="interval",
+                    eval_interval=8,
+                ),
             ),
             model=SeaSplatfactoModelConfig(),
         ),
