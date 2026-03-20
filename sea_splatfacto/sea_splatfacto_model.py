@@ -323,6 +323,7 @@ class SeaSplatfactoModel(SplatfactoModel):
         self.warmup_counter = 0
         self.medium_steps_total = 0
         self.done_binf_init_with_bg = False
+        self._training_optimizers = None
         self.adjust_gs_colors_for_color_correction = False
         self.gs_color_correction_counter = 0
         self._in_medium_burst: bool = False
@@ -435,6 +436,10 @@ class SeaSplatfactoModel(SplatfactoModel):
             List[TrainingCallback]: _description_
         """
         cbs = super().get_training_callbacks(training_callback_attributes)
+
+        # Store optimizers reference for mid-training optimizer state reset
+        # (needed to match reference train.py:211 which recreates bs_optimizer)
+        self._training_optimizers = training_callback_attributes.optimizers
 
         cbs.append(
             TrainingCallback(
@@ -1037,9 +1042,22 @@ class SeaSplatfactoModel(SplatfactoModel):
                         self.learned_bg.data.reshape(3, 1, 1)
                     )
                 self.done_binf_init_with_bg = True
+
+                # Reset Adam state for backscatter model after B_inf re-init.
+                # Reference (train.py:211) recreates the entire optimizer here,
+                # which resets Adam's momentum (m) and variance (v) estimates
+                # for all backscatter params including beta_B conv weights.
+                if self._training_optimizers is not None:
+                    bs_opt = self._training_optimizers.optimizers.get(
+                        "backscatter_model"
+                    )
+                    if bs_opt is not None:
+                        bs_opt.state.clear()
+
                 CONSOLE.log(
                     f"[INFO] [Step {step}] B_inf initialized from learned_bg = "
                     f"{torch.sigmoid(self.learned_bg).tolist()}"
+                    f"; backscatter optimizer state reset"
                 )
 
             # Start initial 1000-step medium-only warm-up burst
