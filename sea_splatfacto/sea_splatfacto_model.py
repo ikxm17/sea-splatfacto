@@ -4,6 +4,7 @@ Template Model File
 Currently this subclasses the Nerfacto model. Consider subclassing from the base Model.
 """
 
+import math
 import torch
 
 from torch.nn import Parameter
@@ -316,6 +317,19 @@ class SeaSplatfactoModelConfig(SplatfactoModelConfig):
     do_z_score: bool = False
     """Z-score filter the direct signal to ±3 standard deviations (clamps extreme values)."""
 
+    # Model-dev idea 002: Phase 3 medium LR decay
+    use_medium_lr_decay: bool = False
+    """[idea-002] Decay medium model LR during Phase 3 joint training to prevent
+    medium parameter drift. When enabled, exponentially decays the backscatter and
+    attenuation optimizer learning rates from their initial value to
+    initial_lr * medium_lr_decay_factor over medium_lr_decay_steps steps,
+    starting at Phase 3 onset."""
+    medium_lr_decay_factor: float = 0.01
+    """[idea-002] Final LR as a fraction of initial LR.
+    E.g., 0.01 decays from 1e-2 to 1e-4."""
+    medium_lr_decay_steps: int = 10000
+    """[idea-002] Number of training steps over which to decay (from Phase 3 onset)."""
+
 
 class SeaSplatfactoModel(SplatfactoModel):
     """_summary_
@@ -378,6 +392,7 @@ class SeaSplatfactoModel(SplatfactoModel):
         self.gs_color_correction_counter = 0
         self._in_medium_burst: bool = False
         self._gs_frozen: bool = False
+        self._phase3_onset_step: int = -1
 
         CONSOLE.log(
             f"[INFO] do_seathru: {self.config.do_seathru}, "
@@ -1163,8 +1178,36 @@ class SeaSplatfactoModel(SplatfactoModel):
                 self.gs_color_correction_counter += 1
 
         else:
-            # Normal joint training — interleaved medium steps handled
+            # Phase 3: joint training — interleaved medium steps handled
             # in step_post_backward() (1 medium step every
             # medium_update_interval iterations, matching reference
             # train.py:434).
-            pass
+
+            # Record Phase 3 onset for LR decay scheduling
+            if self._phase3_onset_step < 0:
+                self._phase3_onset_step = step
+                CONSOLE.log(f"[INFO] [Step {step}] Phase 3 onset (joint training)")
+                if self.config.use_medium_lr_decay:
+                    initial_lr = self.config.backscatter_attenuation_lr
+                    final_lr = initial_lr * self.config.medium_lr_decay_factor
+                    CONSOLE.log(
+                        f"[INFO] [Step {step}] Medium LR decay enabled: "
+                        f"{initial_lr:.1e} → {final_lr:.1e} over "
+                        f"{self.config.medium_lr_decay_steps} steps"
+                    )
+
+            # [idea-002] Apply medium LR decay during Phase 3
+            if self.config.use_medium_lr_decay and self._phase3_onset_step >= 0:
+                progress = min(
+                    (step - self._phase3_onset_step) / self.config.medium_lr_decay_steps,
+                    1.0,
+                )
+                # Exponential interpolation: initial_lr at progress=0,
+                # initial_lr * decay_factor at progress=1
+                new_lr = self.config.backscatter_attenuation_lr * (
+                    self.config.medium_lr_decay_factor ** progress
+                )
+                for name in ("backscatter_model", "attenuation_model"):
+                    if hasattr(self, "optimizers") and name in self.optimizers:
+                        for pg in self.optimizers[name].param_groups:
+                            pg["lr"] = new_lr
