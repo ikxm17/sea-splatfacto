@@ -15,6 +15,7 @@ except ImportError:
     print("Please install gsplat>=1.0.0")
 
 from pytorch_msssim import SSIM
+from pytorch_msssim.ssim import _fspecial_gauss_1d, gaussian_filter
 
 from dataclasses import dataclass, field
 from typing import Dict, List, Literal, Optional, Tuple, Type, Union
@@ -64,6 +65,56 @@ from sea_splatfacto.utils.loss_utils import (
     depth_weighted_l1_loss,
     depth_weighted_l2_loss,
 )
+
+
+def _compute_ssim_components(
+    X: torch.Tensor,
+    Y: torch.Tensor,
+    data_range: float = 1.0,
+    win_size: int = 11,
+    win_sigma: float = 1.5,
+) -> Tuple[float, float, float, float]:
+    """Compute SSIM with full 3-way decomposition (Wang et al. 2004).
+
+    Returns (ssim, luminance, contrast, structure) as scalar floats.
+    Uses the same Gaussian window as pytorch_msssim for numerical consistency.
+    """
+    K1, K2 = 0.01, 0.03
+    C1 = (K1 * data_range) ** 2
+    C2 = (K2 * data_range) ** 2
+    C3 = C2 / 2
+
+    C = X.shape[1]  # channels
+    win = _fspecial_gauss_1d(win_size, win_sigma).repeat([C, 1, 1, 1]).to(X.device, dtype=X.dtype)
+
+    mu1 = gaussian_filter(X, win)
+    mu2 = gaussian_filter(Y, win)
+
+    mu1_sq = mu1.pow(2)
+    mu2_sq = mu2.pow(2)
+    mu1_mu2 = mu1 * mu2
+
+    sigma1_sq = gaussian_filter(X * X, win) - mu1_sq
+    sigma2_sq = gaussian_filter(Y * Y, win) - mu2_sq
+    sigma12 = gaussian_filter(X * Y, win) - mu1_mu2
+
+    sigma1 = torch.sqrt(sigma1_sq.clamp(min=0))
+    sigma2 = torch.sqrt(sigma2_sq.clamp(min=0))
+
+    # 3-way decomposition
+    l_map = (2 * mu1_mu2 + C1) / (mu1_sq + mu2_sq + C1)
+    c_map = (2 * sigma1 * sigma2 + C2) / (sigma1_sq + sigma2_sq + C2)
+    s_map = (sigma12 + C3) / (sigma1 * sigma2 + C3)
+
+    # Average across spatial dims, then across channels
+    l_val = float(torch.flatten(l_map, 2).mean(-1).mean().item())
+    c_val = float(torch.flatten(c_map, 2).mean(-1).mean().item())
+    s_val = float(torch.flatten(s_map, 2).mean(-1).mean().item())
+
+    ssim_map = l_map * c_map * s_map
+    ssim_val = float(torch.flatten(ssim_map, 2).mean(-1).mean().item())
+
+    return ssim_val, l_val, c_val, s_val
 
 
 @dataclass
@@ -858,10 +909,26 @@ class SeaSplatfactoModel(SplatfactoModel):
         gt_1chw = torch.moveaxis(gt_rgb, -1, 0)[None, ...]
         pred_1chw = torch.moveaxis(pred_rgb, -1, 0)[None, ...]
 
+        # SSIM decomposition (luminance, contrast, structure)
+        ssim_val, ssim_l, ssim_c, ssim_s = _compute_ssim_components(gt_1chw, pred_1chw)
+
+        # LPIPS per-layer decomposition (AlexNet, 5 layers)
+        lpips_total, lpips_layers = self.lpips.net(
+            gt_1chw, pred_1chw, retperlayer=True, normalize=True
+        )
+
         metrics_dict = {
             "psnr": float(self.psnr(gt_1chw, pred_1chw).item()),
-            "ssim": float(self.ssim(gt_1chw, pred_1chw)),
-            "lpips": float(self.lpips(gt_1chw, pred_1chw)),
+            "ssim": ssim_val,
+            "ssim_luminance": ssim_l,
+            "ssim_contrast": ssim_c,
+            "ssim_structure": ssim_s,
+            "lpips": float(lpips_total.item()),
+            "lpips_layer1": float(lpips_layers[0].item()),
+            "lpips_layer2": float(lpips_layers[1].item()),
+            "lpips_layer3": float(lpips_layers[2].item()),
+            "lpips_layer4": float(lpips_layers[3].item()),
+            "lpips_layer5": float(lpips_layers[4].item()),
         }
 
         # Also compute metrics on the clean (in-air) restored image
