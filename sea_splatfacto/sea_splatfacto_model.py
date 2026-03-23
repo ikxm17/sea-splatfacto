@@ -555,6 +555,7 @@ class SeaSplatfactoModel(SplatfactoModel):
             image = rendered_image
 
         outputs["image"] = image
+        outputs["clean_rgb"] = image
         outputs["rendered_image"] = rendered_image
 
         # also store the detached bg composited version fro gw_detach_alpha_bg
@@ -614,11 +615,11 @@ class SeaSplatfactoModel(SplatfactoModel):
             backscatter_bchw = self.backscatter_model(depth_bchw)  # [1, 3, H, W]
             backscatter_detach_bchw = self.backscatter_model(depth_bchw.detach())
 
-            # combined underwater image
-            underwater_bchw = torch.clamp(direct_bchw + backscatter_bchw, 0.0, 1.0)
+            # combined medium image (scene through water)
+            medium_bchw = torch.clamp(direct_bchw + backscatter_bchw, 0.0, 1.0)
 
             # Store in outputs (HWC format)
-            outputs["underwater_rgb"] = self._to_hwc(underwater_bchw)
+            outputs["medium_rgb"] = self._to_hwc(medium_bchw)
             outputs["direct"] = self._to_hwc(direct_bchw)
             outputs["backscatter"] = self._to_hwc(backscatter_bchw)
             outputs["attenuation_map"] = self._to_hwc(attenuation_map_bchw)
@@ -632,10 +633,10 @@ class SeaSplatfactoModel(SplatfactoModel):
         return outputs
 
     def get_metrics_dict(self, outputs, batch) -> Dict[str, torch.Tensor]:
-        # Use underwater image for PSNR when seathru is active
+        # Use medium image for PSNR when seathru is active
         modified_outputs = dict(outputs)
-        if "underwater_rgb" in outputs:
-            modified_outputs["rgb"] = outputs["underwater_rgb"]
+        if "medium_rgb" in outputs:
+            modified_outputs["rgb"] = outputs["medium_rgb"]
         else:
             modified_outputs["rgb"] = outputs["image"]
 
@@ -670,11 +671,11 @@ class SeaSplatfactoModel(SplatfactoModel):
         Returns:
             Dict[str, torch.Tensor]: _description_
         """
-        seathru_forward = "underwater_rgb" in outputs
+        seathru_forward = "medium_rgb" in outputs
 
         modified_outputs = dict(outputs)
         if seathru_forward:
-            modified_outputs["rgb"] = outputs["underwater_rgb"]
+            modified_outputs["rgb"] = outputs["medium_rgb"]
         else:
             modified_outputs["rgb"] = outputs["image"]
 
@@ -696,7 +697,7 @@ class SeaSplatfactoModel(SplatfactoModel):
         alpha_bchw = self._to_bchw(alpha)
         depth_bchw = self._to_bchw(depth)
 
-        pred_image = outputs["underwater_rgb"] if seathru_forward else image
+        pred_image = outputs["medium_rgb"] if seathru_forward else image
         pred_image_bchw = self._to_bchw(pred_image)
 
         step = self.step
@@ -723,7 +724,7 @@ class SeaSplatfactoModel(SplatfactoModel):
             )
 
             if seathru_forward:
-                uw_chw = outputs["underwater_rgb"].permute(2, 0, 1)
+                medium_chw = outputs["medium_rgb"].permute(2, 0, 1)
                 b_inf_sigmoid = torch.sigmoid(self.backscatter_model.B_inf.detach())
 
                 if (
@@ -735,13 +736,13 @@ class SeaSplatfactoModel(SplatfactoModel):
                         alpha_bg_loss = torch.tensor(0.0, device=self.device)
                     if self.config.alpha_binf_uw:
                         alpha_bg_loss = alpha_bg_loss + self.alpha_bg_criterion(
-                            uw_chw.detach(),
+                            medium_chw.detach(),
                             b_inf_sigmoid.squeeze(),
                             alpha_chw,
                         )
                     if self.config.alpha_bg_uw:
                         alpha_bg_loss = alpha_bg_loss + self.alpha_bg_criterion(
-                            uw_chw.detach(),
+                            medium_chw.detach(),
                             b_inf_sigmoid.squeeze(),
                             alpha_chw,
                         )
@@ -763,7 +764,7 @@ class SeaSplatfactoModel(SplatfactoModel):
                         alpha_bg_loss = torch.tensor(0.0, device=self.device)
                     else:
                         alpha_bg_loss = self.alpha_bg_criterion(
-                            uw_chw.detach(),
+                            medium_chw.detach(),
                             torch.sigmoid(self.learned_bg.detach()),
                             alpha_chw,
                         )
@@ -893,11 +894,12 @@ class SeaSplatfactoModel(SplatfactoModel):
             self.get_gt_img(batch["image"]), outputs["background"]
         )  # [H,W,3]
 
-        # Select the predicted image -- underwater if available, else clean
-        if "underwater_rgb" in outputs:
-            pred_rgb = outputs["underwater_rgb"]
+        # Select the predicted image -- medium if available, else clean
+        if "medium_rgb" in outputs:
+            pred_rgb = outputs["medium_rgb"]
         else:
             pred_rgb = outputs["image"]
+        seathru_forward = "medium_rgb" in outputs
 
         # Clamp for safety
         pred_rgb = torch.clamp(pred_rgb, 0.0, 1.0)
@@ -918,6 +920,9 @@ class SeaSplatfactoModel(SplatfactoModel):
         )
 
         metrics_dict = {
+            # Primary metrics (nerfstudio compatibility)
+            # When seathru active: these are medium metrics
+            # When seathru inactive: these are clean metrics
             "psnr": float(self.psnr(gt_1chw, pred_1chw).item()),
             "ssim": ssim_val,
             "ssim_luminance": ssim_l,
@@ -931,11 +936,18 @@ class SeaSplatfactoModel(SplatfactoModel):
             "lpips_layer5": float(lpips_layers[4].item()),
         }
 
-        # Also compute metrics on the clean (in-air) restored image
-        if "image" in outputs and "underwater_rgb" in outputs:
-            clean = torch.clamp(outputs["image"], 0.0, 1.0)
+        # Clean (out-of-medium) metrics — scene without water effects
+        # Only meaningful when seathru is active (otherwise clean == primary)
+        if seathru_forward:
+            clean = torch.clamp(outputs["clean_rgb"], 0.0, 1.0)
             clean_1chw = torch.moveaxis(clean, -1, 0)[None, ...]
+            clean_ssim, _, _, _ = _compute_ssim_components(gt_1chw, clean_1chw)
+            clean_lpips_total, _ = self.lpips.net(
+                gt_1chw, clean_1chw, retperlayer=True, normalize=True
+            )
             metrics_dict["clean_psnr"] = float(self.psnr(gt_1chw, clean_1chw).item())
+            metrics_dict["clean_ssim"] = clean_ssim
+            metrics_dict["clean_lpips"] = float(clean_lpips_total.item())
 
         images_dict: Dict[str, torch.Tensor] = {"img": combined_rgb}
 
@@ -950,7 +962,7 @@ class SeaSplatfactoModel(SplatfactoModel):
         if alpha is not None:
             images_dict["alpha"] = alpha.repeat(1, 1, 3)
 
-        # Underwater-specific visualizations
+        # Medium model visualizations
         if "backscatter" in outputs:
             images_dict["backscatter"] = torch.clamp(outputs["backscatter"], 0.0, 1.0)
         if "attenuation_map" in outputs:
@@ -959,8 +971,8 @@ class SeaSplatfactoModel(SplatfactoModel):
             )
         if "direct" in outputs:
             images_dict["direct"] = torch.clamp(outputs["direct"], 0.0, 1.0)
-        if "underwater_rgb" in outputs:
-            images_dict["underwater"] = torch.clamp(outputs["underwater_rgb"], 0.0, 1.0)
+        if "medium_rgb" in outputs:
+            images_dict["medium"] = torch.clamp(outputs["medium_rgb"], 0.0, 1.0)
         if "rendered_image" in outputs:
             images_dict["clean_render"] = torch.clamp(
                 outputs["rendered_image"], 0.0, 1.0
