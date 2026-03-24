@@ -338,6 +338,26 @@ class SeaSplatfactoModelConfig(SplatfactoModelConfig):
       output = (1 - alpha) * raw_image + alpha * medium_image
     where alpha ramps from 0 to 1 over medium_fade_in_steps steps."""
 
+    # Model-dev idea 005-A1: Robust mask for marine snow
+    use_robust_mask: bool = False
+    """[idea-005-A1] RobustNeRF-style trimmed least-squares mask that excludes
+    high-error pixels (likely marine snow or other transient occluders) from the
+    reconstruction loss. The mask is recomputed each iteration based on per-pixel
+    L1 errors, with a dynamic threshold interpolated from tracked loss statistics."""
+    robust_mask_percentage: Tuple[float, float] = (0.0, 0.40)
+    """[idea-005-A1] (min, max) fraction of pixels to mask out. The actual percentage
+    is dynamically interpolated based on current loss relative to tracked min/max."""
+    robust_mask_reset_interval: int = 6000
+    """[idea-005-A1] Steps between resetting the max loss tracker. Allows the
+    dynamic range to adapt as training progresses."""
+    never_mask_upper: float = 0.0
+    """[idea-005-A1] Fraction of image (top rows) to never mask. Set to 0.0 for
+    underwater scenes (no sky). SplatFactoW uses 0.4 for outdoor scenes."""
+    start_robust_mask_at: int = 6000
+    """[idea-005-A1] First training step to enable robust masking. Must be after
+    the medium model has had time to converge, so early-training residuals reflect
+    genuine model error rather than initialization artifacts."""
+
 
 class SeaSplatfactoModel(SplatfactoModel):
     """_summary_
@@ -402,6 +422,10 @@ class SeaSplatfactoModel(SplatfactoModel):
         self._gs_frozen: bool = False
         self._phase3_onset_step: int = -1
         self._phase2_onset_step: int = -1
+
+        # Robust mask loss tracking (idea 005-A1)
+        self._robust_loss_min: float = float("inf")
+        self._robust_loss_max: float = float("-inf")
 
         CONSOLE.log(
             f"[INFO] do_seathru: {self.config.do_seathru}, "
@@ -699,6 +723,72 @@ class SeaSplatfactoModel(SplatfactoModel):
 
         return metrics_dict
 
+    @torch.no_grad()
+    def _compute_robust_mask(self, errors: torch.Tensor) -> torch.Tensor:
+        """Compute a binary inlier mask using trimmed least-squares (RobustNeRF/SplatFactoW).
+
+        Pixels with high per-pixel error (likely marine snow or other transient
+        occluders) are masked out. The masking threshold is dynamically determined
+        from a quantile of the error distribution, with the quantile percentage
+        interpolated between a min/max range based on tracked loss statistics.
+
+        Args:
+            errors: Per-pixel absolute errors, shape [H, W, C].
+
+        Returns:
+            Binary mask [H, W, 1] where 1 = inlier (keep), 0 = outlier (mask).
+        """
+        H, W, C = errors.shape
+
+        # Zero out the top portion of the image (never mask sky region).
+        # For underwater scenes, never_mask_upper should be 0.0.
+        if self.config.never_mask_upper > 0.0:
+            errors = errors.clone()
+            errors[: int(H * self.config.never_mask_upper), :, :] = 0.0
+
+        # Track min/max loss for dynamic masking percentage
+        mean_loss = errors.mean().item()
+        if (
+            mean_loss > self._robust_loss_max
+            or self.step % self.config.robust_mask_reset_interval == 0
+        ):
+            self._robust_loss_max = mean_loss
+        if mean_loss < self._robust_loss_min:
+            self._robust_loss_min = mean_loss
+
+        # Interpolate masking percentage from loss statistics
+        loss_range = self._robust_loss_max - self._robust_loss_min + 1e-6
+        pct_min, pct_max = self.config.robust_mask_percentage
+        mask_percentage = (
+            (mean_loss - self._robust_loss_min) / loss_range
+        ) * (pct_max - pct_min) + pct_min
+
+        # Per-pixel error (mean over channels)
+        error_per_pixel = errors.mean(dim=-1, keepdim=True)  # [H, W, 1]
+
+        # Inlier threshold: pixels below this quantile are kept
+        inlier_threshold = torch.quantile(
+            error_per_pixel.reshape(-1), 1.0 - mask_percentage
+        )
+        is_inlier = (error_per_pixel <= inlier_threshold).float()  # [H, W, 1]
+
+        # Spatial smoothing: 5x5 box filter to ensure spatial coherence
+        # A pixel with enough inlier neighbors is also kept
+        f = 5
+        window = torch.ones(1, 1, f, f, device=errors.device) / (f * f)
+        is_inlier_bchw = is_inlier.permute(2, 0, 1).unsqueeze(0)  # [1, 1, H, W]
+        has_inlier_neighbors = torch.nn.functional.conv2d(
+            is_inlier_bchw, window, padding="same"
+        )
+        has_inlier_neighbors = (
+            has_inlier_neighbors.squeeze(0).permute(1, 2, 0) > 0.4
+        ).float()  # [H, W, 1]
+
+        # Union: pixel is inlier if it passes EITHER criterion
+        mask = ((is_inlier + has_inlier_neighbors) > 0.0).float()  # [H, W, 1]
+
+        return mask
+
     def get_loss_dict(
         self, outputs, batch, metrics_dict=None
     ) -> Dict[str, torch.Tensor]:
@@ -743,9 +833,38 @@ class SeaSplatfactoModel(SplatfactoModel):
 
         step = self.step
 
+        # Robust mask: recompute main_loss with outlier pixels masked out (idea 005-A1)
+        if self.config.use_robust_mask and step >= self.config.start_robust_mask_at:
+            per_pixel_errors = torch.abs(pred_image - gt_image)  # [H, W, 3]
+            robust_mask = self._compute_robust_mask(per_pixel_errors)  # [H, W, 1]
+
+            # Apply mask to both images (zeroing outlier pixels)
+            gt_masked = gt_image * robust_mask
+            pred_masked = pred_image * robust_mask
+
+            # Recompute L1 and SSIM with masked images
+            Ll1_masked = torch.abs(gt_masked - pred_masked).mean()
+            simloss_masked = 1.0 - self.ssim(
+                gt_masked.permute(2, 0, 1)[None, ...],
+                pred_masked.permute(2, 0, 1)[None, ...],
+            )
+            loss_dict["main_loss"] = (
+                (1 - self.config.ssim_lambda) * Ll1_masked
+                + self.config.ssim_lambda * simloss_masked
+            )
+        else:
+            robust_mask = None
+
         # Depth-weighted reconstruction L1
         if self.config.add_recon_depth_l1:
-            depth_weighted_l1 = depth_weighted_l1_loss(pred_image, gt_image, depth.detach())
+            if robust_mask is not None:
+                depth_weighted_l1 = depth_weighted_l1_loss(
+                    pred_image * robust_mask, gt_image * robust_mask, depth.detach()
+                )
+            else:
+                depth_weighted_l1 = depth_weighted_l1_loss(
+                    pred_image, gt_image, depth.detach()
+                )
             loss_dict["recon_depth_l1"] = self.config.dwr_lambda * depth_weighted_l1
 
         # Opacity prior (mixture-of-laplacians)
