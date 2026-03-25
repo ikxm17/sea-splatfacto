@@ -221,6 +221,12 @@ class SeaSplatfactoModelConfig(SplatfactoModelConfig):
     opacity_prior_lambda: float = 0.0001
     """Weight for the opacity prior loss."""
 
+    # Mean opacity regularizer (idea 006)
+    opacity_reg_lambda: float = 0.0
+    """[idea-006] Penalizes mean opacity across all Gaussians, pushing unnecessary
+    Gaussians toward zero. Useful for reducing floaters in narrow-view datasets.
+    Set > 0 to enable (typical range 1e-3 to 1e-2). 0.0 = disabled."""
+
     # Depth-weighted reconstruction loss
     add_recon_depth_l1: bool = True
     """Add a depth-weighted L1 reconstruction loss."""
@@ -873,6 +879,10 @@ class SeaSplatfactoModel(SplatfactoModel):
                 self.config.opacity_prior_lambda
                 * mixture_of_laplacians_loss(torch.sigmoid(self.opacities))
             )
+
+        # Mean opacity regularizer (idea 006)
+        if self.config.opacity_reg_lambda > 0.0:
+            loss_dict["opacity_reg"] = self.config.opacity_reg_lambda * torch.sigmoid(self.opacities).mean()
 
         # Alpha-background loss
         if self.config.learn_background:
