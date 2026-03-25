@@ -348,6 +348,29 @@ class SeaSplatfactoModelConfig(SplatfactoModelConfig):
       output = (1 - alpha) * raw_image + alpha * medium_image
     where alpha ramps from 0 to 1 over medium_fade_in_steps steps."""
 
+    # Model-dev idea 005-B0: Per-frame learnable marine snow tensor
+    use_marine_snow: bool = False
+    """[idea-005-B0] Learn a per-frame additive residual S_k that captures
+    view-inconsistent marine snow particles. The full observation model becomes
+    I_observed = I_underwater + softplus(S_k), where S_k is optimized per frame
+    with sparsity and smoothness priors."""
+    marine_snow_l1_lambda: float = 0.01
+    """[idea-005-B0] L1 sparsity prior weight. Pushes S_k toward zero (most
+    pixels should have no snow). Higher values = sparser snow maps."""
+    marine_snow_tv_lambda: float = 0.001
+    """[idea-005-B0] Total-variation smoothness prior weight. Encourages spatially
+    smooth snow particles (Gaussian blobs, not pixel noise)."""
+    marine_snow_from_iter: int = 15000
+    """[idea-005-B0] First step to enable marine snow learning. Must be after
+    densification stabilizes so that Gaussians learn scene geometry first,
+    not marine snow artifacts."""
+    marine_snow_resolution: int = 64
+    """[idea-005-B0] Spatial resolution of the per-frame snow map. The raw
+    tensor is (N, 3, res, res) and bilinearly upsampled to image resolution.
+    Lower values enforce implicit spatial smoothness (marine snow particles
+    are multi-pixel blobs). 64 gives ~5-20 pixel effective particle size
+    at 1232x816 training resolution."""
+
     # Model-dev idea 005-A1: Robust mask for marine snow
     use_robust_mask: bool = False
     """[idea-005-A1] RobustNeRF-style trimmed least-squares mask that excludes
@@ -432,6 +455,22 @@ class SeaSplatfactoModel(SplatfactoModel):
         self._gs_frozen: bool = False
         self._phase3_onset_step: int = -1
         self._phase2_onset_step: int = -1
+
+        # Per-frame marine snow tensor (idea 005-B0)
+        if self.config.use_marine_snow:
+            res = self.config.marine_snow_resolution
+            self.marine_snow_raw = torch.nn.Parameter(
+                torch.full(
+                    (self.num_train_data, 3, res, res),
+                    -5.0,  # softplus(-5) ≈ 0.007, near-zero init
+                )
+            )
+            mem_mb = self.marine_snow_raw.numel() * 4 / 1e6
+            CONSOLE.log(
+                f"[INFO] Marine snow tensor: ({self.num_train_data}, 3, {res}, {res}), "
+                f"{mem_mb:.1f} MB, l1={self.config.marine_snow_l1_lambda}, "
+                f"tv={self.config.marine_snow_tv_lambda}, from_iter={self.config.marine_snow_from_iter}"
+            )
 
         # Robust mask loss tracking (idea 005-A1)
         self._robust_loss_min: float = float("inf")
@@ -528,6 +567,14 @@ class SeaSplatfactoModel(SplatfactoModel):
                 if self.attenuation_model is not None:
                     for p in self.attenuation_model.parameters():
                         p.grad = None
+
+        # [idea-005-B0] Null marine snow gradients before activation
+        if (
+            self.config.use_marine_snow
+            and hasattr(self, "marine_snow_raw")
+            and step < self.config.marine_snow_from_iter
+        ):
+            self.marine_snow_raw.grad = None
 
         # Normal operation -- run Splatfacto's strategy (densification/pruning)
         super().step_post_backward(step)
@@ -705,6 +752,20 @@ class SeaSplatfactoModel(SplatfactoModel):
                 attenuation_map_detach_bchw
             )
 
+        # [idea-005-B0] Per-frame marine snow: I_observed = I_underwater + softplus(S_k)
+        if self.config.use_marine_snow and self.training:
+            cam_idx = camera.metadata["cam_idx"]
+            H, W = rendered_image.shape[:2]
+
+            # Low-res tensor → softplus (non-negative) → bilinear upsample to image res
+            snow_raw = self.marine_snow_raw[cam_idx].unsqueeze(0)  # [1, 3, res, res]
+            snow_lowres = torch.nn.functional.softplus(snow_raw)
+            snow_bchw = torch.nn.functional.interpolate(
+                snow_lowres, size=(H, W), mode="bilinear", align_corners=False
+            )  # [1, 3, H, W]
+            snow_hwc = self._to_hwc(snow_bchw)  # [H, W, 3]
+            outputs["marine_snow"] = snow_hwc
+
         return outputs
 
     def get_metrics_dict(self, outputs, batch) -> Dict[str, torch.Tensor]:
@@ -730,6 +791,10 @@ class SeaSplatfactoModel(SplatfactoModel):
             metrics_dict["binf_r"] = binf[0]
             metrics_dict["binf_g"] = binf[1]
             metrics_dict["binf_b"] = binf[2]
+
+        # [idea-005-B0] Log snow magnitude
+        if "marine_snow" in outputs:
+            metrics_dict["snow_magnitude"] = outputs["marine_snow"].detach().mean()
 
         return metrics_dict
 
@@ -814,11 +879,27 @@ class SeaSplatfactoModel(SplatfactoModel):
         """
         seathru_forward = "medium_rgb" in outputs
 
+        # [idea-005-B0] When marine snow is active, the reconstruction target
+        # becomes observed_rgb = medium_rgb + snow_map, so the per-frame snow
+        # tensor absorbs marine snow particles instead of the Gaussians.
+        snow_active = (
+            "marine_snow" in outputs
+            and self.config.use_marine_snow
+            and self.step >= self.config.marine_snow_from_iter
+        )
+
         modified_outputs = dict(outputs)
         if seathru_forward:
-            modified_outputs["rgb"] = outputs["medium_rgb"]
+            pred_rgb = outputs["medium_rgb"]
         else:
-            modified_outputs["rgb"] = outputs["image"]
+            pred_rgb = outputs["image"]
+
+        if snow_active:
+            observed_rgb = torch.clamp(pred_rgb + outputs["marine_snow"], 0.0, 1.0)
+            modified_outputs["rgb"] = observed_rgb
+            outputs["observed_rgb"] = observed_rgb
+        else:
+            modified_outputs["rgb"] = pred_rgb
 
         loss_dict = super().get_loss_dict(modified_outputs, batch, metrics_dict)
 
@@ -838,7 +919,8 @@ class SeaSplatfactoModel(SplatfactoModel):
         alpha_bchw = self._to_bchw(alpha)
         depth_bchw = self._to_bchw(depth)
 
-        pred_image = outputs["medium_rgb"] if seathru_forward else image
+        # pred_image for reconstruction losses: includes snow when active
+        pred_image = observed_rgb if snow_active else pred_rgb
         pred_image_bchw = self._to_bchw(pred_image)
 
         step = self.step
@@ -887,6 +969,15 @@ class SeaSplatfactoModel(SplatfactoModel):
         # Mean opacity regularizer (idea 006) — gated to start after densification
         if self.config.opacity_reg_lambda > 0.0 and step >= self.config.opacity_reg_from_iter:
             loss_dict["opacity_reg"] = self.config.opacity_reg_lambda * torch.sigmoid(self.opacities).mean()
+
+        # Per-frame marine snow regularization (idea 005-B0)
+        if snow_active:
+            snow_map = outputs["marine_snow"]  # [H, W, 3]
+            snow_bchw = self._to_bchw(snow_map)  # [1, 3, H, W]
+            # L1 sparsity: most pixels should have zero snow
+            loss_dict["snow_l1"] = self.config.marine_snow_l1_lambda * snow_map.mean()
+            # TV smoothness: snow particles are spatially smooth (Gaussian blobs)
+            loss_dict["snow_tv"] = self.config.marine_snow_tv_lambda * total_variation_loss(snow_bchw)
 
         # Alpha-background loss
         if self.config.learn_background:
@@ -1150,6 +1241,11 @@ class SeaSplatfactoModel(SplatfactoModel):
         if "rendered_image" in outputs:
             images_dict["clean_render"] = torch.clamp(
                 outputs["rendered_image"], 0.0, 1.0
+            )
+        if "marine_snow" in outputs:
+            # Scale up for visibility (snow is typically very sparse/dim)
+            images_dict["marine_snow"] = torch.clamp(
+                outputs["marine_snow"] * 5.0, 0.0, 1.0
             )
 
         return metrics_dict, images_dict
