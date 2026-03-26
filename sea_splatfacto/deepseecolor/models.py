@@ -1,3 +1,5 @@
+from typing import Optional
+
 import torch
 import torch.nn as nn
 
@@ -50,11 +52,18 @@ class BackscatterNetV2(nn.Module):
             self.residual_conv_params = nn.Parameter(torch.rand(3, 1, 1, 1))
             self.J_prime = nn.Parameter(torch.rand(3, 1, 1))
 
-    def forward(self, depth: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self,
+        depth: torch.Tensor,
+        binf_offset: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
         """Compute backscatter B(z) from depth map.
 
         Args:
             depth: [1, 1, H, W] normalized depth map.
+            binf_offset: [3, 1, 1] optional per-frame offset added to B_inf
+                in logit space (before sigmoid). Used by idea-007-A for
+                per-frame water color correction.
         Returns:
             [1, 3, H, W] per-channel backscatter contribution.
         """
@@ -71,7 +80,9 @@ class BackscatterNetV2(nn.Module):
 
         # B(z) = sigmoid(B_inf) * (1 - exp(-beta_B * z))
         # beta_b_conv = conv2d(depth, params) already equals β·z; do NOT multiply by depth again
-        backscatter = torch.sigmoid(self.B_inf) * (1 - torch.exp(-beta_b_conv))
+        # [idea-007-A] Per-frame B_inf offset (logit space) for water color correction
+        B_inf = self.B_inf if binf_offset is None else self.B_inf + binf_offset
+        backscatter = torch.sigmoid(B_inf) * (1 - torch.exp(-beta_b_conv))
 
         # Residual term: adds secondary depth-dependent contribution
         if self.use_residual:
