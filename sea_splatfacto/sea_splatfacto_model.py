@@ -1158,7 +1158,7 @@ class SeaSplatfactoModel(SplatfactoModel):
             # DCP loss (dark channel prior on estimated direct signal)
             if self.config.use_dcp_loss:
                 reverse_direct = gt_bchw.detach() - backscatter_detach_bchw
-                dcp_loss, _ = self.dcp_criterion(reverse_direct, depth_bchw.detach())
+                dcp_loss = self.dcp_criterion(reverse_direct, depth_bchw.detach())
                 loss_dict["dcp"] = self.config.dcp_loss_lambda * dcp_loss
 
             # RGB saturation loss
@@ -1177,7 +1177,7 @@ class SeaSplatfactoModel(SplatfactoModel):
             if self.config.use_binf_loss:
                 loss_dict["binf"] = (
                     self.config.binf_loss_lambda
-                    * self.backscatter_model.forward_rgb(clean_bchw.detach())
+                    * self.backscatter_model.compute_binf_loss(clean_bchw.detach())
                 )
 
             # DSC attenuation loss
