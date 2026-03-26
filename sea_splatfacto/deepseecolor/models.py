@@ -2,14 +2,24 @@ import torch
 import torch.nn as nn
 
 class BackscatterNetV2(nn.Module):
-    """_summary_
+    """Backscatter model — Eq (3) backscatter term.
 
+    Models depth-dependent water backscatter:
+        B(z) = sigmoid(B_inf) * (1 - exp(-beta_B * z))
+
+    Where:
+    - B_inf [3,1,1]: water color at infinite depth (sigmoid-constrained to (0,1))
+    - beta_B: per-channel backscatter coefficients (encoded as conv2d weights)
+    - conv2d(depth, params) computes beta_B * z (1x1 conv = per-channel scalar multiply)
+
+    Optional residual term (use_residual=True):
+        B(z) += sigmoid(J_prime) * exp(-beta_D' * z)
 
     Args:
-        use_residual (bool, optional): _description_. Defaults to False.
-        scale (float, optional): _description_. Defaults to 1.0.
-        do_sigmoid (bool, optional): _description_. Defaults to False.
-        init_vals (bool, optional): _description_. Defaults to False.
+        use_residual: Add secondary exponential decay term. Default: False.
+        scale: Multiplier for conv params when do_sigmoid=True. Default: 1.0.
+        do_sigmoid: Apply sigmoid to conv params before multiplication. Default: False.
+        init_vals: Use reference initialization [0.95, 0.8, 0.8]. Default: False.
     """
 
     def __init__(
@@ -19,14 +29,6 @@ class BackscatterNetV2(nn.Module):
         do_sigmoid: bool = False,
         init_vals: bool = False,
     ):
-        """_summary_
-
-        Args:
-            use_residual (bool, optional): _description_. Defaults to False.
-            scale (float, optional): _description_. Defaults to 1.0.
-            do_sigmoid (bool, optional): _description_. Defaults to False.
-            init_vals (bool, optional): _description_. Defaults to False.
-        """
         super().__init__()
         self.scale = scale
         self.do_sigmoid = do_sigmoid
@@ -49,13 +51,12 @@ class BackscatterNetV2(nn.Module):
             self.J_prime = nn.Parameter(torch.rand(3, 1, 1))
 
     def forward(self, depth: torch.Tensor) -> torch.Tensor:
-        """_summary_
+        """Compute backscatter B(z) from depth map.
 
         Args:
-            depth (_type_): _description_
-
+            depth: [1, 1, H, W] normalized depth map.
         Returns:
-            _type_: _description_
+            [1, 3, H, W] per-channel backscatter contribution.
         """
         if self.do_sigmoid:
             beta_b_conv = self.relu(
@@ -68,11 +69,11 @@ class BackscatterNetV2(nn.Module):
                 nn.functional.conv2d(depth, self.backscatter_conv_params), 0.0
             )
 
-        # backscatter model: B(depth) = B_inf * (1 - exp(-beta_b * depth))
+        # B(z) = sigmoid(B_inf) * (1 - exp(-beta_B * z))
         # beta_b_conv = conv2d(depth, params) already equals β·z; do NOT multiply by depth again
         backscatter = torch.sigmoid(self.B_inf) * (1 - torch.exp(-beta_b_conv))
 
-        # ? What is this part doing?
+        # Residual term: adds secondary depth-dependent contribution
         if self.use_residual:
             if self.do_sigmoid:
                 beta_d_conv = self.relu(
@@ -89,34 +90,48 @@ class BackscatterNetV2(nn.Module):
 
         return backscatter
 
-    def forward_rgb(self, rgb):
+    def compute_binf_loss(self, clean_bchw):
+        """B_inf loss: push B_inf toward estimated atmospheric light.
+
+        NOT from paper — extra loss from reference code.
+        Estimates atmospheric light from the clean render using the dark channel
+        prior, then penalizes MSE distance to B_inf.
+
+        Config: use_binf_loss (default False), binf_loss_lambda (default 1.0)
+
+        Args:
+            clean_bchw: [B, C, H, W] clean rendered image (detached at call site).
+        """
         from sea_splatfacto.utils.uw_utils import estimate_atmospheric_light
-        
+
         atmospheric_colors = list()
-        for rgb_image in rgb:
+        for rgb_image in clean_bchw:
             atmospheric_colors.append(estimate_atmospheric_light(rgb_image.detach()))
-        
+
         atmospheric_color = torch.mean(torch.stack(atmospheric_colors), dim=0)
-        
+
         return self.l2(atmospheric_color.squeeze(), self.B_inf.squeeze())
         
 
 class AttenuateNetV3(nn.Module):
-    """_summary_
+    """Attenuation model — Eq (3) transmission term.
 
+    Models depth-dependent light attenuation (transmission):
+        T(z) = exp(-beta_D * z)
+
+    Where beta_D are per-channel attenuation coefficients. Red light attenuates
+    fastest underwater, so beta_D_R > beta_D_G > beta_D_B at convergence.
+
+    conv2d(depth, params) computes beta_D * z (1x1 conv = per-channel scalar multiply).
+    The direct signal is then: D = J * T(z) = clean_rgb * exp(-beta_D * z).
 
     Args:
-        nn (_type_): _description_
+        scale: Multiplier for conv params when do_sigmoid=True.
+        do_sigmoid: Apply sigmoid to conv params before multiplication. Default: False.
+        init_vals: Use reference initialization [1.1, 0.95, 0.95]. Default: False.
     """
 
     def __init__(self, scale, do_sigmoid: bool = False, init_vals: bool = False):
-        """_summary_
-
-        Args:
-            scale (_type_): _description_
-            do_sigmoid (bool, optional): _description_. Defaults to False.
-            init_vals (bool, optional): _description_. Defaults to False.
-        """
         super().__init__()
         self.scale = scale
         self.do_sigmoid = do_sigmoid
@@ -130,13 +145,12 @@ class AttenuateNetV3(nn.Module):
             self.attenuation_conv_params = nn.Parameter(torch.rand(3, 1, 1, 1))
 
     def forward(self, depth: torch.Tensor) -> torch.Tensor:
-        """_summary_
+        """Compute transmission T(z) from depth map.
 
         Args:
-            depth (torch.Tensor): _description_
-
+            depth: [1, 1, H, W] normalized depth map.
         Returns:
-            torch.Tensor: _description_
+            [1, 3, H, W] per-channel transmission values in (0, 1].
         """
         if self.do_sigmoid:
             beta_d_conv = torch.relu(
