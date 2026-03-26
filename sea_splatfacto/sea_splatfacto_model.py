@@ -712,24 +712,24 @@ class SeaSplatfactoModel(SplatfactoModel):
 
         if self.config.learn_background:
             if self.config.bg_from_backscatter and seathru_forward:
-                image = rendered_image  # after SeaThru activates, stop adding learned_bg, the backscatter model fills in the water color
+                clean_rgb = rendered_image  # after SeaThru activates, stop adding learned_bg, the backscatter model fills in the water color
             else:
                 bg_color = torch.sigmoid(self.learned_bg)  # [3]
                 bg_image = bg_color.reshape(1, 1, 3) * (1 - alpha)  # [H, W, 3]
-                image = rendered_image + bg_image
+                clean_rgb = rendered_image + bg_image
         else:
-            image = rendered_image
+            clean_rgb = rendered_image
 
-        outputs["image"] = image
-        outputs["clean_rgb"] = image
+        outputs["image"] = clean_rgb
+        outputs["clean_rgb"] = clean_rgb
         outputs["rendered_image"] = rendered_image
 
-        # also store the detached bg composited version fro gw_detach_alpha_bg
+        # Clean render variant with detached background (no GW gradients into learned_bg)
         if self.config.learn_background and self.config.gw_detach_alpha_bg:
             bg_detached = torch.sigmoid(self.learned_bg.detach()).reshape(1, 1, 3) * (
                 1 - alpha
             )
-            outputs["image_bg_detached"] = rendered_image + bg_detached
+            outputs["clean_rgb_bg_detached"] = rendered_image + bg_detached
 
         # Depth processing
         if depth_raw is not None:
@@ -743,14 +743,14 @@ class SeaSplatfactoModel(SplatfactoModel):
         # SeaThru forward
         if seathru_forward:
             # convert to BCHW for medium models
-            image_bchw = self._to_bchw(image)  # [1, 3, H, W]
+            clean_bchw = self._to_bchw(clean_rgb)  # [1, 3, H, W]
             depth_bchw = self._to_bchw(depth_processed)  # [1, 1, H, W]
 
             # attenuation
             if self.config.disable_attenuation:
-                direct_bchw = image_bchw
+                direct_bchw = clean_bchw
                 attenuation_map_bchw = torch.ones_like(
-                    image_bchw
+                    clean_bchw
                 )  # all 1s, no attenuation
                 attenuation_map_detach_bchw = attenuation_map_bchw
             else:
@@ -760,7 +760,7 @@ class SeaSplatfactoModel(SplatfactoModel):
                 attenuation_map_detach_bchw = self.attenuation_model(
                     depth_bchw.detach()
                 )
-                direct_bchw = image_bchw * attenuation_map_bchw
+                direct_bchw = clean_bchw * attenuation_map_bchw
 
             # z-score filter
             if self.config.do_z_score:
@@ -797,7 +797,7 @@ class SeaSplatfactoModel(SplatfactoModel):
                 )
                 if fade_progress < 1.0:
                     medium_bchw = (
-                        (1.0 - fade_progress) * image_bchw
+                        (1.0 - fade_progress) * clean_bchw
                         + fade_progress * medium_bchw
                     )
 
@@ -839,7 +839,7 @@ class SeaSplatfactoModel(SplatfactoModel):
         if "medium_rgb" in outputs:
             modified_outputs["rgb"] = outputs["medium_rgb"]
         else:
-            modified_outputs["rgb"] = outputs["image"]
+            modified_outputs["rgb"] = outputs["clean_rgb"]
 
         metrics_dict = super().get_metrics_dict(modified_outputs, batch)
 
@@ -957,7 +957,7 @@ class SeaSplatfactoModel(SplatfactoModel):
         if seathru_forward:
             pred_rgb = outputs["medium_rgb"]
         else:
-            pred_rgb = outputs["image"]
+            pred_rgb = outputs["clean_rgb"]
 
         if snow_active:
             observed_rgb = torch.clamp(pred_rgb + outputs["marine_snow"], 0.0, 1.0)
@@ -972,32 +972,31 @@ class SeaSplatfactoModel(SplatfactoModel):
         gt_image = self.composite_with_background(
             self.get_gt_img(batch["image"]), outputs["background"]
         )  # [H, W, 3]
-        image = outputs["image"]  # clean render + learned_bg
+        clean_rgb = outputs["clean_rgb"]  # clean render + learned_bg
         rendered_image = outputs["rendered_image"]  # raw render
         alpha = outputs["accumulation"]  # [H,W,1]
         depth = outputs["depth_processed"]  # [H,W,1]
 
         # tensors in BCHW for loss criteria that expect batch format
         gt_bchw = self._to_bchw(gt_image)
-        img_bchw = self._to_bchw(image)
+        clean_bchw = self._to_bchw(clean_rgb)
         render_bchw = self._to_bchw(rendered_image)
         alpha_bchw = self._to_bchw(alpha)
         depth_bchw = self._to_bchw(depth)
 
-        # pred_image for reconstruction losses: includes snow when active
-        pred_image = observed_rgb if snow_active else pred_rgb
-        pred_image_bchw = self._to_bchw(pred_image)
+        # Final prediction for reconstruction losses: includes snow when active
+        pred_rgb = observed_rgb if snow_active else pred_rgb
 
         step = self.step
 
         # Robust mask: recompute main_loss with outlier pixels masked out (idea 005-A1)
         if self.config.use_robust_mask and step >= self.config.start_robust_mask_at:
-            per_pixel_errors = torch.abs(pred_image - gt_image)  # [H, W, 3]
+            per_pixel_errors = torch.abs(pred_rgb - gt_image)  # [H, W, 3]
             robust_mask = self._compute_robust_mask(per_pixel_errors)  # [H, W, 1]
 
             # Apply mask to both images (zeroing outlier pixels)
             gt_masked = gt_image * robust_mask
-            pred_masked = pred_image * robust_mask
+            pred_masked = pred_rgb * robust_mask
 
             # Recompute L1 and SSIM with masked images
             Ll1_masked = torch.abs(gt_masked - pred_masked).mean()
@@ -1016,11 +1015,11 @@ class SeaSplatfactoModel(SplatfactoModel):
         if self.config.add_recon_depth_l1:
             if robust_mask is not None:
                 depth_weighted_l1 = depth_weighted_l1_loss(
-                    pred_image * robust_mask, gt_image * robust_mask, depth.detach()
+                    pred_rgb * robust_mask, gt_image * robust_mask, depth.detach()
                 )
             else:
                 depth_weighted_l1 = depth_weighted_l1_loss(
-                    pred_image, gt_image, depth.detach()
+                    pred_rgb, gt_image, depth.detach()
                 )
             loss_dict["recon_depth_l1"] = self.config.dwr_lambda * depth_weighted_l1
 
@@ -1124,15 +1123,15 @@ class SeaSplatfactoModel(SplatfactoModel):
         if self.config.use_gw_loss and step > self.config.gw_from_iter:
             if self.config.use_render_for_gw:
                 gray_world_input = render_bchw
-            elif self.config.gw_detach_alpha_bg and "image_bg_detached" in outputs:
-                gray_world_input = self._to_bchw(outputs["image_bg_detached"])
+            elif self.config.gw_detach_alpha_bg and "clean_rgb_bg_detached" in outputs:
+                gray_world_input = self._to_bchw(outputs["clean_rgb_bg_detached"])
             elif self.config.gw_reverse_J and seathru_forward:
                 # J = direct.detach() / attenuation
                 direct_bchw = self._to_bchw(outputs["direct"])
                 attenuation_bchw = self._to_bchw(outputs["attenuation_map"])
                 gray_world_input = direct_bchw.detach() / attenuation_bchw.clamp(min=1e-8)
             else:
-                gray_world_input = img_bchw
+                gray_world_input = clean_bchw
 
             if self.config.gw_filter_by_alpha > 0.0:
                 mask = (
@@ -1165,20 +1164,20 @@ class SeaSplatfactoModel(SplatfactoModel):
             # RGB saturation loss
             if self.config.use_rgb_sat_loss:
                 loss_dict["rgb_sat"] = (
-                    self.config.sat_loss_lambda * self.rgb_sat_criterion(img_bchw)
+                    self.config.sat_loss_lambda * self.rgb_sat_criterion(clean_bchw)
                 )
 
             # RGB spatial variation loss
             if self.config.use_rgb_sv_loss:
                 loss_dict["rgb_sv"] = self.config.rgb_sv_lambda * self.rgb_sv_criterion(
-                    img_bchw.detach(), direct_bchw
+                    clean_bchw.detach(), direct_bchw
                 )
 
             # B_inf loss
             if self.config.use_binf_loss:
                 loss_dict["binf"] = (
                     self.config.binf_loss_lambda
-                    * self.backscatter_model.forward_rgb(img_bchw.detach())
+                    * self.backscatter_model.forward_rgb(clean_bchw.detach())
                 )
 
             # DSC attenuation loss
@@ -1228,7 +1227,7 @@ class SeaSplatfactoModel(SplatfactoModel):
         if "medium_rgb" in outputs:
             pred_rgb = outputs["medium_rgb"]
         else:
-            pred_rgb = outputs["image"]
+            pred_rgb = outputs["clean_rgb"]
         seathru_forward = "medium_rgb" in outputs
 
         # Clamp for safety
@@ -1238,22 +1237,22 @@ class SeaSplatfactoModel(SplatfactoModel):
         combined_rgb = torch.cat([gt_rgb, pred_rgb], dim=1)
 
         # Metrics: PSNR, SSIM, LPIPS -- in [1,C,H,W] format
-        gt_1chw = torch.moveaxis(gt_rgb, -1, 0)[None, ...]
-        pred_1chw = torch.moveaxis(pred_rgb, -1, 0)[None, ...]
+        gt_bchw = torch.moveaxis(gt_rgb, -1, 0)[None, ...]
+        pred_bchw = torch.moveaxis(pred_rgb, -1, 0)[None, ...]
 
         # SSIM decomposition (luminance, contrast, structure)
-        ssim_val, ssim_l, ssim_c, ssim_s = _compute_ssim_components(gt_1chw, pred_1chw)
+        ssim_val, ssim_l, ssim_c, ssim_s = _compute_ssim_components(gt_bchw, pred_bchw)
 
         # LPIPS per-layer decomposition (AlexNet, 5 layers)
         lpips_total, lpips_layers = self.lpips.net(
-            gt_1chw, pred_1chw, retperlayer=True, normalize=True
+            gt_bchw, pred_bchw, retperlayer=True, normalize=True
         )
 
         metrics_dict = {
             # Primary metrics (nerfstudio compatibility)
             # When seathru active: these are medium metrics
             # When seathru inactive: these are clean metrics
-            "psnr": float(self.psnr(gt_1chw, pred_1chw).item()),
+            "psnr": float(self.psnr(gt_bchw, pred_bchw).item()),
             "ssim": ssim_val,
             "ssim_luminance": ssim_l,
             "ssim_contrast": ssim_c,
@@ -1269,13 +1268,13 @@ class SeaSplatfactoModel(SplatfactoModel):
         # Clean (out-of-medium) metrics — scene without water effects
         # Only meaningful when seathru is active (otherwise clean == primary)
         if seathru_forward:
-            clean = torch.clamp(outputs["clean_rgb"], 0.0, 1.0)
-            clean_1chw = torch.moveaxis(clean, -1, 0)[None, ...]
-            clean_ssim, _, _, _ = _compute_ssim_components(gt_1chw, clean_1chw)
+            clean_rgb = torch.clamp(outputs["clean_rgb"], 0.0, 1.0)
+            clean_bchw = torch.moveaxis(clean_rgb, -1, 0)[None, ...]
+            clean_ssim, _, _, _ = _compute_ssim_components(gt_bchw, clean_bchw)
             clean_lpips_total, _ = self.lpips.net(
-                gt_1chw, clean_1chw, retperlayer=True, normalize=True
+                gt_bchw, clean_bchw, retperlayer=True, normalize=True
             )
-            metrics_dict["clean_psnr"] = float(self.psnr(gt_1chw, clean_1chw).item())
+            metrics_dict["clean_psnr"] = float(self.psnr(gt_bchw, clean_bchw).item())
             metrics_dict["clean_ssim"] = clean_ssim
             metrics_dict["clean_lpips"] = float(clean_lpips_total.item())
 
