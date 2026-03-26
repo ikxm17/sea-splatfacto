@@ -830,8 +830,10 @@ class SeaSplatfactoModel(SplatfactoModel):
                 )
 
             # [idea-007-A] Per-frame B_inf offset for water color correction
+            # Apply during both training AND eval when cam_idx is available.
+            # Novel views (no cam_idx) fall back to identity (offset=0).
             binf_offset = None
-            if self.config.use_per_frame_binf and self.training:
+            if self.config.use_per_frame_binf and "cam_idx" in camera.metadata:
                 cam_idx = camera.metadata["cam_idx"]
                 binf_offset = self.per_frame_binf_offsets[cam_idx].reshape(3, 1, 1)
 
@@ -847,7 +849,9 @@ class SeaSplatfactoModel(SplatfactoModel):
             medium_bchw = torch.clamp(direct_bchw + backscatter_bchw, 0.0, 1.0)
 
             # [idea-007-B] Per-frame exposure/color correction
-            if self.config.use_per_frame_exposure and self.training:
+            # Apply during both training AND eval when cam_idx is available.
+            # Novel views (no cam_idx) fall back to identity (scale=1).
+            if self.config.use_per_frame_exposure and "cam_idx" in camera.metadata:
                 cam_idx = camera.metadata["cam_idx"]
                 exposure_scale = torch.exp(
                     self.per_frame_exposure[cam_idx]
