@@ -171,6 +171,9 @@ class SeaSplatfactoModelConfig(SplatfactoModelConfig):
     )
     sh_degree: int = 0
     """SeaSplat uses SH degree 0 (no view-dependent color)."""
+    color_activation: Literal["sigmoid", "linear"] = "linear"
+    """Use linear color representation to match original 3DGS. Sigmoid causes gradient vanishing
+    for underwater scenes where red channel saturates near zero, preventing medium decomposition."""
     densify_grad_thresh: float = 0.0002
     """SeaSplat uses the original 3DGS densification gradient threshold."""
     use_absgrad: bool = False
