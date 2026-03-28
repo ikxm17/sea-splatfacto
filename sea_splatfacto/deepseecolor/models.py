@@ -1,3 +1,4 @@
+import math
 from typing import Optional
 
 import torch
@@ -147,10 +148,13 @@ class AttenuateNetV3(nn.Module):
         init_vals: Use reference initialization [1.1, 0.95, 0.95]. Default: False.
     """
 
-    def __init__(self, scale, do_sigmoid: bool = False, init_vals: bool = False, beta_d_init: Optional[list] = None):
+    def __init__(self, scale, do_sigmoid: bool = False, init_vals: bool = False, beta_d_init: Optional[list] = None, max_amplification: Optional[float] = None):
         super().__init__()
         self.scale = scale
         self.do_sigmoid = do_sigmoid
+        # [idea-011-A] Hard clamp on attenuation to limit clean/medium divergence
+        # max_amplification=3.0 means 1/T(z) ≤ 3, so beta_d*z ≤ log(3)
+        self.max_attenuation_log = math.log(max_amplification) if max_amplification is not None else None
 
         # beta_d: attenuation coefficients (per-channel, rgb)
         if beta_d_init is not None:
@@ -185,6 +189,9 @@ class AttenuateNetV3(nn.Module):
 
         # attenuation model: exp(-beta_d * depth)
         # beta_d_conv = conv2d(depth, params) already equals β·z; do NOT multiply by depth again
+        # [idea-011-A] Clamp beta_d*z to limit amplification factor 1/T(z)
+        if self.max_attenuation_log is not None:
+            beta_d_conv = torch.clamp(beta_d_conv, max=self.max_attenuation_log)
         attenuation = torch.exp(-beta_d_conv)
 
         return attenuation

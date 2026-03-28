@@ -390,6 +390,39 @@ class SeaSplatfactoModelConfig(SplatfactoModelConfig):
     beta_b_init_b: float = -1.0
     """[idea-009] Backscatter β_B blue channel initialization. -1 = random."""
 
+    # Model-dev idea 011: Clean render output constraints (from DeepSeeColor analysis)
+    use_amplification_clamp: bool = False
+    """[idea-011-A] Hard-clamp exp(β_D·z) to a maximum, limiting how different
+    clean_rgb can be from the direct signal. From DeepSeeColor's proven design."""
+    max_amplification: float = 3.0
+    """[idea-011-A] Maximum amplification factor 1/T(z). 3.0 means clean can be
+    at most 3× brighter than direct. DeepSeeColor uses 3.0."""
+    use_clean_saturation_loss: bool = False
+    """[idea-011-B] Penalize clean_rgb values outside [0, 1]. Prevents blown-out
+    clean renders from Gaussian color compensation."""
+    clean_sat_lambda: float = 1.0
+    """[idea-011-B] Weight for clean render saturation loss."""
+    use_variance_preservation: bool = False
+    """[idea-011-C] Penalize mismatch between clean and medium render spatial
+    variance. Detects Gaussian co-adaptation via spatial statistics divergence."""
+    var_preservation_lambda: float = 1.0
+    """[idea-011-C] Weight for variance preservation loss."""
+    use_beta_d_ordering: bool = False
+    """[idea-011-D] Enforce physical channel ordering β_D_R > β_D_G > β_D_B
+    (red attenuates fastest underwater)."""
+    beta_d_ordering_lambda: float = 0.1
+    """[idea-011-D] Weight for channel ordering loss."""
+
+    # Model-dev idea 013: GS color stop-gradient during medium steps
+    use_gs_color_stop_gradient: bool = False
+    """[idea-013] Detach clean_rgb during medium update steps so Gaussians cannot
+    co-adapt while the medium is updating. Inspired by DeepSeeColor's .detach()
+    between stages."""
+    medium_window_size: int = 1
+    """[idea-013] Number of consecutive medium steps before switching to GS steps.
+    1 = current alternating behavior. Higher values give the medium time to converge
+    before Gaussians react (DeepSeeColor uses 500)."""
+
     # Model-dev idea 010: β_D minimum regularization
     use_beta_d_min_reg: bool = False
     """[idea-010] Penalize β_D values below per-channel minimums using a smooth
@@ -556,6 +589,7 @@ class SeaSplatfactoModel(SplatfactoModel):
                 do_sigmoid=self.config.attenuation_do_sigmoid,
                 init_vals=not self.config.attenuation_do_sigmoid and not use_beta_d_init,
                 beta_d_init=beta_d_init if use_beta_d_init else None,
+                max_amplification=self.config.max_amplification if self.config.use_amplification_clamp else None,
             )
 
             # [idea-009] Log medium initialization
@@ -762,7 +796,7 @@ class SeaSplatfactoModel(SplatfactoModel):
             # an interleaved update every medium_update_interval steps to stay
             # warm (reference: train.py:434-463 — the `iteration %
             # update_bs_at_interval == 0` check runs during CC too).
-            if step % self.config.medium_update_interval == 0:
+            if self._is_medium_step(step):
                 # Interleaved medium step during CC: null GS + bg grads
                 for param in self.gauss_params.values():
                     param.grad = None
@@ -795,8 +829,9 @@ class SeaSplatfactoModel(SplatfactoModel):
         # Reference (train.py:434): medium optimizers step ONCE every
         # update_bs_at_interval iterations (with `continue` to skip GS).
         # On all other iterations, GS optimizer steps normally.
+        # [idea-013] medium_window_size > 1 runs consecutive medium steps per cycle.
         if self.seathru_active and self.medium_inited:
-            if step % self.config.medium_update_interval == 0:
+            if self._is_medium_step(step):
                 # Interleaved medium step: null GS + bg grads, medium updates
                 for param in self.gauss_params.values():
                     param.grad = None
@@ -958,6 +993,18 @@ class SeaSplatfactoModel(SplatfactoModel):
             # convert to BCHW for medium models
             clean_bchw = self._to_bchw(clean_rgb)  # [1, 3, H, W]
             depth_bchw = self._to_bchw(depth_processed)  # [1, 1, H, W]
+
+            # [idea-013] Stop-gradient on Gaussian colors during medium steps
+            # Detach clean_bchw so medium receives full gradients but they don't
+            # flow back into Gaussian colors, preventing co-adaptation
+            if (
+                self.config.use_gs_color_stop_gradient
+                and self.training
+                and self.seathru_active
+                and self.medium_inited
+                and self._is_medium_step(self.step)
+            ):
+                clean_bchw = clean_bchw.detach()
 
             # attenuation
             if self.config.disable_attenuation:
@@ -1498,6 +1545,33 @@ class SeaSplatfactoModel(SplatfactoModel):
                     * torch.nn.functional.softplus(beta_d_min - beta_d).mean()
                 )
 
+            # [idea-011-B] Clean render saturation — penalize clean_rgb outside [0, 1]
+            if self.config.use_clean_saturation_loss:
+                loss_dict["clean_sat"] = (
+                    self.config.clean_sat_lambda
+                    * (torch.relu(-clean_bchw) + torch.relu(clean_bchw - 1.0)).square().mean()
+                )
+
+            # [idea-011-C] Variance preservation — clean and medium spatial stats should match
+            if self.config.use_variance_preservation and "medium_rgb" in outputs:
+                medium_bchw = self._to_bchw(outputs["medium_rgb"])
+                clean_std = torch.std(clean_bchw, dim=[2, 3])
+                medium_std = torch.std(medium_bchw, dim=[2, 3])
+                loss_dict["var_preservation"] = (
+                    self.config.var_preservation_lambda
+                    * torch.nn.functional.mse_loss(clean_std, medium_std)
+                )
+
+            # [idea-011-D] Channel ratio ordering — enforce β_D_R > β_D_G > β_D_B
+            if self.config.use_beta_d_ordering and self.attenuation_model is not None:
+                beta_d = self.attenuation_model.attenuation_conv_params.squeeze()
+                # Penalize when green >= red or blue >= green
+                loss_dict["beta_d_ordering"] = (
+                    self.config.beta_d_ordering_lambda
+                    * (torch.relu(beta_d[1] / beta_d[0].clamp(min=1e-8) - 1.0)
+                       + torch.relu(beta_d[2] / beta_d[1].clamp(min=1e-8) - 1.0))
+                )
+
             # DSC attenuation loss
             if self.config.use_dsc_attenuation_loss:
                 reverse_direct_detached = (gt_bchw - backscatter_bchw).detach()
@@ -1633,6 +1707,21 @@ class SeaSplatfactoModel(SplatfactoModel):
         return metrics_dict, images_dict
 
     # Helpers
+    @staticmethod
+    def _is_medium_step(self, step: int) -> bool:
+        """Check if the current step is a medium update step.
+
+        With medium_window_size=1 (default), this matches the existing behavior:
+        one medium step every medium_update_interval steps.
+
+        With medium_window_size=W, runs W consecutive medium steps in every
+        (medium_update_interval + W) cycle.
+        """
+        window = self.config.medium_window_size
+        interval = self.config.medium_update_interval
+        cycle = interval + window - 1  # total cycle length
+        return (step % cycle) < window
+
     @staticmethod
     def _to_bchw(hwc: torch.Tensor) -> torch.Tensor:
         """Convert [H, W, C] to [1, C, H, W]"""
