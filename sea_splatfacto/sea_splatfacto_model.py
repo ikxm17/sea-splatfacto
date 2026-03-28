@@ -390,6 +390,20 @@ class SeaSplatfactoModelConfig(SplatfactoModelConfig):
     beta_b_init_b: float = -1.0
     """[idea-009] Backscatter β_B blue channel initialization. -1 = random."""
 
+    # Model-dev idea 010: β_D minimum regularization
+    use_beta_d_min_reg: bool = False
+    """[idea-010] Penalize β_D values below per-channel minimums using a smooth
+    softplus penalty. Prevents the optimizer from collapsing attenuation to
+    near-identity, which is the root bypass mechanism for decomposition."""
+    beta_d_min_reg_lambda: float = 0.1
+    """[idea-010] Weight for the β_D minimum regularization loss."""
+    beta_d_min_r: float = 0.2
+    """[idea-010] Minimum β_D for red channel. Red attenuates fastest underwater."""
+    beta_d_min_g: float = 0.1
+    """[idea-010] Minimum β_D for green channel."""
+    beta_d_min_b: float = 0.05
+    """[idea-010] Minimum β_D for blue channel. Blue attenuates least."""
+
     # Model-dev idea 002: Phase 3 medium LR decay
     use_medium_lr_decay: bool = False
     """[idea-002] Decay medium model LR during Phase 3 joint training to prevent
@@ -1469,6 +1483,19 @@ class SeaSplatfactoModel(SplatfactoModel):
                 loss_dict["binf"] = (
                     self.config.binf_loss_lambda
                     * self.backscatter_model.compute_binf_loss(clean_bchw.detach())
+                )
+
+            # β_D minimum regularization — prevent attenuation collapse to identity
+            if self.config.use_beta_d_min_reg and self.attenuation_model is not None:
+                beta_d = self.attenuation_model.attenuation_conv_params.squeeze()
+                beta_d_min = torch.tensor(
+                    [self.config.beta_d_min_r, self.config.beta_d_min_g, self.config.beta_d_min_b],
+                    device=beta_d.device, dtype=beta_d.dtype,
+                )
+                # softplus(min - val): smooth penalty when val < min, ~0 when val > min
+                loss_dict["beta_d_min"] = (
+                    self.config.beta_d_min_reg_lambda
+                    * torch.nn.functional.softplus(beta_d_min - beta_d).mean()
                 )
 
             # DSC attenuation loss
