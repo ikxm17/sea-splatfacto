@@ -1707,7 +1707,6 @@ class SeaSplatfactoModel(SplatfactoModel):
         return metrics_dict, images_dict
 
     # Helpers
-    @staticmethod
     def _is_medium_step(self, step: int) -> bool:
         """Check if the current step is a medium update step.
 
