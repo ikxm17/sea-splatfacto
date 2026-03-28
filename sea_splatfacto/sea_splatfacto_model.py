@@ -365,6 +365,16 @@ class SeaSplatfactoModelConfig(SplatfactoModelConfig):
     do_z_score: bool = False
     """Z-score filter the direct signal to ±3 standard deviations (clamps extreme values)."""
 
+    # Model-dev idea 008: Early medium conditioning
+    use_early_medium: bool = False
+    """[idea-008] Put the medium model in the rendering path during Phase 1
+    with FROZEN parameters. Forces Gaussians to learn colors that, when
+    transformed by the medium, reproduce the underwater GT image. Prevents
+    Gaussian entrenchment (memorizing underwater colors directly)."""
+    early_medium_warmup_steps: int = 200
+    """[idea-008] Shortened Phase 2a warm-up when early medium is active.
+    The medium doesn't need to 'catch up' since it was present from step 0."""
+
     # Model-dev idea 002: Phase 3 medium LR decay
     use_medium_lr_decay: bool = False
     """[idea-002] Decay medium model LR during Phase 3 joint training to prevent
@@ -597,6 +607,12 @@ class SeaSplatfactoModel(SplatfactoModel):
             f"seathru_from_iter: {self.config.seathru_from_iter}, "
             f"disable_attenuation: {self.config.disable_attenuation}"
         )
+        if self.config.use_early_medium:
+            CONSOLE.log(
+                f"[INFO] [idea-008] Early medium conditioning ENABLED. "
+                f"Medium in rendering path from step 0 (frozen). "
+                f"Phase 2a warmup: {self.config.early_medium_warmup_steps} steps."
+            )
 
     def step_post_backward(self, step: int) -> None:
         """After backward: null out gradients for groups that should NOT be
@@ -616,6 +632,20 @@ class SeaSplatfactoModel(SplatfactoModel):
         Source: train.py lines 430-463 (alternating optimization),
                 train.py lines 516-557 (densification -- skipped when frozen).
         """
+        # [idea-008] Early medium phase: medium is in the rendering path but
+        # FROZEN. Null medium gradients so only Gaussians update. Gaussians
+        # receive gradients through the frozen medium (differentiable transform).
+        if self.config.use_early_medium and not self.seathru_active:
+            if self.backscatter_model is not None:
+                for p in self.backscatter_model.parameters():
+                    p.grad = None
+            if self.attenuation_model is not None:
+                for p in self.attenuation_model.parameters():
+                    p.grad = None
+            # Continue to densification (Gaussians still update normally)
+            super().step_post_backward(step)
+            return
+
         if self._in_medium_burst:
             # Medium-only: null out GS and learned_bg gradients
             for param in self.gauss_params.values():
@@ -774,11 +804,21 @@ class SeaSplatfactoModel(SplatfactoModel):
         depth_raw = outputs["depth"]  # [H, W, 1] or None
 
         # Learned background compositing
+        # [idea-008] Early medium: put medium in the rendering path during Phase 1
+        # with frozen parameters. Gaussians learn through the medium transform.
+        early_medium_phase = (
+            self.config.use_early_medium
+            and self.config.do_seathru
+            and self.backscatter_model is not None
+            and self.attenuation_model is not None
+            and self.training
+            and not self.seathru_active
+        )
         seathru_forward = (
             self.config.do_seathru
             and self.backscatter_model is not None
             and self.attenuation_model is not None
-            and (self.seathru_active or not self.training)
+            and (self.seathru_active or not self.training or early_medium_phase)
         )
 
         if self.config.learn_background:
@@ -905,6 +945,10 @@ class SeaSplatfactoModel(SplatfactoModel):
             outputs["attenuation_depth_detached"] = self._to_hwc(
                 attenuation_map_detach_bchw
             )
+            # [idea-008] Flag so loss dict knows to skip medium-specific losses
+            # during early medium phase (medium is frozen, can't respond to losses)
+            if early_medium_phase:
+                outputs["early_medium_phase"] = True
 
         # [idea-005] Marine snow: I_observed = I_underwater + S_k
         if self.config.use_marine_snow and self.training:
@@ -1093,6 +1137,7 @@ class SeaSplatfactoModel(SplatfactoModel):
             Dict[str, torch.Tensor]: _description_
         """
         seathru_forward = "medium_rgb" in outputs
+        early_medium = outputs.get("early_medium_phase", False)
 
         # [idea-005-B0] When marine snow is active, the reconstruction target
         # becomes observed_rgb = medium_rgb + snow_map, so the per-frame snow
@@ -1202,7 +1247,7 @@ class SeaSplatfactoModel(SplatfactoModel):
                 alpha_chw,
             )
 
-            if seathru_forward:
+            if seathru_forward and not early_medium:
                 medium_chw = outputs["medium_rgb"].permute(2, 0, 1)
                 b_inf_sigmoid = torch.sigmoid(self.backscatter_model.B_inf.detach())
 
@@ -1307,8 +1352,10 @@ class SeaSplatfactoModel(SplatfactoModel):
                 gray_world_input
             )
 
-        # SeaThru loss (only active after SeaThru activation)
-        if seathru_forward:
+        # SeaThru loss (only active after SeaThru activation, NOT during early medium)
+        # [idea-008] During early medium phase, medium is frozen and can't respond
+        # to these losses. Only the main reconstruction loss (medium_rgb vs GT) applies.
+        if seathru_forward and not early_medium:
             backscatter_detach_bchw = self._to_bchw(
                 outputs["backscatter_depth_detached"]
             )
@@ -1638,11 +1685,17 @@ class SeaSplatfactoModel(SplatfactoModel):
             # Initial warm-up burst only (1000 consecutive medium-only steps).
             # Periodic Phase 3 updates are interleaved, not bursted — handled
             # in step_post_backward().
-            if self.warmup_counter >= self.config.medium_warmup_steps:
+            # [idea-008] Use shorter warmup when early medium was active
+            warmup_target = (
+                self.config.early_medium_warmup_steps
+                if self.config.use_early_medium
+                else self.config.medium_warmup_steps
+            )
+            if self.warmup_counter >= warmup_target:
                 self.warmup_counter = 0
                 self._in_medium_burst = False
                 CONSOLE.log(
-                    f"[INFO] [Step {step}] Medium warm-up complete ({self.config.medium_warmup_steps} steps)"
+                    f"[INFO] [Step {step}] Medium warm-up complete ({warmup_target} steps)"
                 )
                 self.medium_inited = True
                 self.adjust_gs_colors_for_color_correction = True
