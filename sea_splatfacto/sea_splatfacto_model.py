@@ -629,6 +629,10 @@ class SeaSplatfactoModel(SplatfactoModel):
         self._robust_loss_min: float = float("inf")
         self._robust_loss_max: float = float("-inf")
 
+        # Gradient magnitude tracking (recorded before nulling in step_post_backward)
+        self._last_grad_bs: float = 0.0
+        self._last_grad_at: float = 0.0
+
         CONSOLE.log(
             f"[INFO] do_seathru: {self.config.do_seathru}, "
             f"seathru_from_iter: {self.config.seathru_from_iter}, "
@@ -659,6 +663,19 @@ class SeaSplatfactoModel(SplatfactoModel):
         Source: train.py lines 430-463 (alternating optimization),
                 train.py lines 516-557 (densification -- skipped when frozen).
         """
+        # Record gradient magnitudes BEFORE nulling — for TensorBoard diagnostics.
+        # Must happen here because get_metrics_dict() runs after nulling.
+        if self.seathru_active and self.backscatter_model is not None:
+            self._last_grad_bs = sum(
+                p.grad.abs().mean().item() for p in self.backscatter_model.parameters()
+                if p.grad is not None
+            )
+        if self.seathru_active and self.attenuation_model is not None:
+            self._last_grad_at = sum(
+                p.grad.abs().mean().item() for p in self.attenuation_model.parameters()
+                if p.grad is not None
+            )
+
         # [idea-008] Early medium phase: medium is in the rendering path but
         # FROZEN. Null medium gradients so only Gaussians update. Gaussians
         # receive gradients through the frozen medium (differentiable transform).
@@ -1034,20 +1051,11 @@ class SeaSplatfactoModel(SplatfactoModel):
             metrics_dict["at_beta_g"] = at_beta[1]
             metrics_dict["at_beta_b"] = at_beta[2]
 
-        # Gradient diagnostics: log gradient magnitudes for medium models
+        # Gradient diagnostics: use pre-recorded values from step_post_backward
+        # (recorded BEFORE gradient nulling, so they reflect actual gradient flow)
         if self.seathru_active and self.training:
-            if self.backscatter_model is not None:
-                bs_grad = sum(
-                    p.grad.abs().mean().item() for p in self.backscatter_model.parameters()
-                    if p.grad is not None
-                )
-                metrics_dict["grad_backscatter"] = torch.tensor(bs_grad)
-            if self.attenuation_model is not None:
-                at_grad = sum(
-                    p.grad.abs().mean().item() for p in self.attenuation_model.parameters()
-                    if p.grad is not None
-                )
-                metrics_dict["grad_attenuation"] = torch.tensor(at_grad)
+            metrics_dict["grad_backscatter"] = torch.tensor(self._last_grad_bs)
+            metrics_dict["grad_attenuation"] = torch.tensor(self._last_grad_at)
 
         # Clean RGB channel means — detect entrenchment (low red = memorized underwater)
         clean_rgb = outputs.get("clean_rgb")
