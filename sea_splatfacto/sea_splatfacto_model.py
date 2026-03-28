@@ -1431,9 +1431,17 @@ class SeaSplatfactoModel(SplatfactoModel):
                 gray_world_input
             )
 
-        # SeaThru loss (only active after SeaThru activation, NOT during early medium)
-        # [idea-008] During early medium phase, medium is frozen and can't respond
-        # to these losses. Only the main reconstruction loss (medium_rgb vs GT) applies.
+        # RGB saturation loss — operates on clean_rgb (Gaussians), physically
+        # meaningful even during early medium Phase 1 where it constrains the
+        # feasible region for Gaussian colors alongside GW.
+        if seathru_forward and self.config.use_rgb_sat_loss:
+            loss_dict["rgb_sat"] = (
+                self.config.sat_loss_lambda * self.rgb_sat_criterion(clean_bchw)
+            )
+
+        # SeaThru losses requiring active (unfrozen) medium — gradients flow
+        # to medium model parameters (backscatter, attenuation, B_inf).
+        # Gated off during early medium Phase 1 because medium is frozen.
         if seathru_forward and not early_medium:
             backscatter_detach_bchw = self._to_bchw(
                 outputs["backscatter_depth_detached"]
@@ -1449,12 +1457,6 @@ class SeaSplatfactoModel(SplatfactoModel):
                 reverse_direct = gt_bchw.detach() - backscatter_detach_bchw
                 dcp_loss = self.dcp_criterion(reverse_direct, depth_bchw.detach())
                 loss_dict["dcp"] = self.config.dcp_loss_lambda * dcp_loss
-
-            # RGB saturation loss
-            if self.config.use_rgb_sat_loss:
-                loss_dict["rgb_sat"] = (
-                    self.config.sat_loss_lambda * self.rgb_sat_criterion(clean_bchw)
-                )
 
             # RGB spatial variation loss
             if self.config.use_rgb_sv_loss:
