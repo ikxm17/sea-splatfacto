@@ -510,6 +510,33 @@ class SeaSplatfactoModel(SplatfactoModel):
                 init_vals=not self.config.attenuation_do_sigmoid,
             )
 
+            # [idea-008] Initialize B_inf from bg_init values (not random) when
+            # early medium is enabled. The frozen medium needs physically
+            # plausible parameters — random B_inf injects garbage during Phase 1.
+            if self.config.use_early_medium and self.config.learn_background:
+                from nerfstudio.utils.rich_utils import CONSOLE as _C
+                bg_init_logit = torch.log(
+                    torch.tensor([
+                        self.config.bg_init_r,
+                        self.config.bg_init_g,
+                        self.config.bg_init_b,
+                    ]).clamp(1e-6, 1 - 1e-6)
+                    / (1 - torch.tensor([
+                        self.config.bg_init_r,
+                        self.config.bg_init_g,
+                        self.config.bg_init_b,
+                    ]).clamp(1e-6, 1 - 1e-6))
+                )
+                with torch.no_grad():
+                    self.backscatter_model.B_inf.data.copy_(
+                        bg_init_logit.reshape(3, 1, 1)
+                    )
+                _C.log(
+                    f"[INFO] [idea-008] B_inf initialized from bg_init = "
+                    f"[{self.config.bg_init_r}, {self.config.bg_init_g}, {self.config.bg_init_b}] "
+                    f"(logit: {bg_init_logit.tolist()})"
+                )
+
         # Learn background
         if self.config.learn_background:
             bg_init = torch.tensor([
@@ -822,7 +849,7 @@ class SeaSplatfactoModel(SplatfactoModel):
         )
 
         if self.config.learn_background:
-            if self.config.bg_from_backscatter and seathru_forward:
+            if self.config.bg_from_backscatter and seathru_forward and not early_medium_phase:
                 clean_rgb = rendered_image  # after SeaThru activates, stop adding learned_bg, the backscatter model fills in the water color
             else:
                 bg_color = torch.sigmoid(self.learned_bg)  # [3]
