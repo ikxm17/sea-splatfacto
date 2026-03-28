@@ -950,6 +950,42 @@ class SeaSplatfactoModel(SplatfactoModel):
             metrics_dict["binf_g"] = binf[1]
             metrics_dict["binf_b"] = binf[2]
 
+            # Backscatter beta (conv params) — effective depth coefficients
+            bs_beta = self.backscatter_model.backscatter_conv_params.detach().squeeze()
+            metrics_dict["bs_beta_r"] = bs_beta[0]
+            metrics_dict["bs_beta_g"] = bs_beta[1]
+            metrics_dict["bs_beta_b"] = bs_beta[2]
+
+        if self.attenuation_model is not None and self.seathru_active:
+            # Attenuation beta_D — controls per-channel light absorption
+            at_beta = self.attenuation_model.attenuation_conv_params.detach().squeeze()
+            metrics_dict["at_beta_r"] = at_beta[0]
+            metrics_dict["at_beta_g"] = at_beta[1]
+            metrics_dict["at_beta_b"] = at_beta[2]
+
+        # Gradient diagnostics: log gradient magnitudes for medium models
+        if self.seathru_active and self.training:
+            if self.backscatter_model is not None:
+                bs_grad = sum(
+                    p.grad.abs().mean().item() for p in self.backscatter_model.parameters()
+                    if p.grad is not None
+                )
+                metrics_dict["grad_backscatter"] = torch.tensor(bs_grad)
+            if self.attenuation_model is not None:
+                at_grad = sum(
+                    p.grad.abs().mean().item() for p in self.attenuation_model.parameters()
+                    if p.grad is not None
+                )
+                metrics_dict["grad_attenuation"] = torch.tensor(at_grad)
+
+        # Clean RGB channel means — detect entrenchment (low red = memorized underwater)
+        clean_rgb = outputs.get("clean_rgb")
+        if clean_rgb is not None:
+            clean_means = clean_rgb.detach().mean(dim=(0, 1))  # [3]
+            metrics_dict["clean_mean_r"] = clean_means[0]
+            metrics_dict["clean_mean_g"] = clean_means[1]
+            metrics_dict["clean_mean_b"] = clean_means[2]
+
         # [idea-003] Log effective GW weight when annealing
         if self.config.use_gw_anneal and self.step > self.config.gw_from_iter:
             anneal_progress = min(
