@@ -30,6 +30,7 @@ class BackscatterNetV2(nn.Module):
         scale: float = 1.0,
         do_sigmoid: bool = False,
         init_vals: bool = False,
+        beta_b_init: Optional[list] = None,
     ):
         super().__init__()
         self.scale = scale
@@ -38,7 +39,11 @@ class BackscatterNetV2(nn.Module):
 
         self.relu = nn.ReLU()
 
-        if init_vals:
+        if beta_b_init is not None:
+            self.backscatter_conv_params = nn.Parameter(
+                torch.tensor(beta_b_init, dtype=torch.float32).reshape(3, 1, 1, 1)
+            )
+        elif init_vals:
             self.backscatter_conv_params = nn.Parameter(
                 torch.Tensor([0.95, 0.8, 0.8]).reshape(3, 1, 1, 1)
             )
@@ -142,13 +147,17 @@ class AttenuateNetV3(nn.Module):
         init_vals: Use reference initialization [1.1, 0.95, 0.95]. Default: False.
     """
 
-    def __init__(self, scale, do_sigmoid: bool = False, init_vals: bool = False):
+    def __init__(self, scale, do_sigmoid: bool = False, init_vals: bool = False, beta_d_init: Optional[list] = None):
         super().__init__()
         self.scale = scale
         self.do_sigmoid = do_sigmoid
 
         # beta_d: attenuation coefficients (per-channel, rgb)
-        if init_vals:
+        if beta_d_init is not None:
+            self.attenuation_conv_params = nn.Parameter(
+                torch.tensor(beta_d_init, dtype=torch.float32).reshape(3, 1, 1, 1)
+            )
+        elif init_vals:
             self.attenuation_conv_params = nn.Parameter(
                 torch.Tensor([1.1, 0.95, 0.95]).reshape(3, 1, 1, 1)
             )

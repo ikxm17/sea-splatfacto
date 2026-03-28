@@ -375,6 +375,21 @@ class SeaSplatfactoModelConfig(SplatfactoModelConfig):
     """[idea-008] Shortened Phase 2a warm-up when early medium is active.
     The medium doesn't need to 'catch up' since it was present from step 0."""
 
+    # Model-dev idea 009: Dataset-informed medium initialization
+    beta_d_init_r: float = 1.1
+    """[idea-009] Attenuation β_D red channel initialization. Higher = more red
+    absorption. Default 1.1 (reference init). Set from dataset color statistics."""
+    beta_d_init_g: float = 0.95
+    """[idea-009] Attenuation β_D green channel initialization."""
+    beta_d_init_b: float = 0.95
+    """[idea-009] Attenuation β_D blue channel initialization."""
+    beta_b_init_r: float = -1.0
+    """[idea-009] Backscatter β_B red channel initialization. -1 = random (default)."""
+    beta_b_init_g: float = -1.0
+    """[idea-009] Backscatter β_B green channel initialization. -1 = random."""
+    beta_b_init_b: float = -1.0
+    """[idea-009] Backscatter β_B blue channel initialization. -1 = random."""
+
     # Model-dev idea 002: Phase 3 medium LR decay
     use_medium_lr_decay: bool = False
     """[idea-002] Decay medium model LR during Phase 3 joint training to prevent
@@ -498,23 +513,52 @@ class SeaSplatfactoModel(SplatfactoModel):
         self.attenuation_model: Optional[AttenuateNetV3] = None
 
         if self.config.do_seathru:
+            # [idea-009] Dataset-informed initialization for medium models
+            beta_d_init = [
+                self.config.beta_d_init_r,
+                self.config.beta_d_init_g,
+                self.config.beta_d_init_b,
+            ]
+            # Use explicit init if any value differs from reference defaults
+            use_beta_d_init = beta_d_init != [1.1, 0.95, 0.95]
+
+            beta_b_vals = [
+                self.config.beta_b_init_r,
+                self.config.beta_b_init_g,
+                self.config.beta_b_init_b,
+            ]
+            # -1 sentinel means "use default behavior" (random init)
+            beta_b_init = beta_b_vals if all(v >= 0 for v in beta_b_vals) else None
+
             # Backscatter and attenuation models
             self.backscatter_model = BackscatterNetV2(
                 use_residual=self.config.backscatter_use_residual,
                 scale=self.config.backscatter_scale,
                 do_sigmoid=self.config.backscatter_do_sigmoid,
+                beta_b_init=beta_b_init,
             )
             self.attenuation_model = AttenuateNetV3(
                 scale=self.config.attenuation_scale,
                 do_sigmoid=self.config.attenuation_do_sigmoid,
-                init_vals=not self.config.attenuation_do_sigmoid,
+                init_vals=not self.config.attenuation_do_sigmoid and not use_beta_d_init,
+                beta_d_init=beta_d_init if use_beta_d_init else None,
             )
+
+            # [idea-009] Log medium initialization
+            from nerfstudio.utils.rich_utils import CONSOLE as _C
+            if use_beta_d_init:
+                _C.log(
+                    f"[INFO] [idea-009] β_D initialized from config: {beta_d_init}"
+                )
+            if beta_b_init is not None:
+                _C.log(
+                    f"[INFO] [idea-009] β_B initialized from config: {beta_b_init}"
+                )
 
             # [idea-008] Initialize B_inf from bg_init values (not random) when
             # early medium is enabled. The frozen medium needs physically
             # plausible parameters — random B_inf injects garbage during Phase 1.
             if self.config.use_early_medium and self.config.learn_background:
-                from nerfstudio.utils.rich_utils import CONSOLE as _C
                 bg_init_logit = torch.log(
                     torch.tensor([
                         self.config.bg_init_r,
