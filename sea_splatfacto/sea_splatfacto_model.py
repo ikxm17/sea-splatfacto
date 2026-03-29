@@ -605,7 +605,7 @@ class SeaSplatfactoModel(SplatfactoModel):
                 torch.zeros(
                     num_points,
                     self.config.color_mlp_feature_dim,
-                    device=self.device,
+                    device=self.gauss_params["means"].device,
                 )
             )
             self.color_mlp_module = ColorMLP(
