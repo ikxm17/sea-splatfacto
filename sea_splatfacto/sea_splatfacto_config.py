@@ -29,6 +29,7 @@ sea_splatfacto_method = MethodSpecification(
         steps_per_eval_batch=0,
         steps_per_eval_all_images=0,
         steps_per_save=2000,
+        save_only_latest_checkpoint=False,
         max_num_iterations=30000,
         mixed_precision=False,
         pipeline=VanillaPipelineConfig(
