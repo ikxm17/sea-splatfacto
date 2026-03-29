@@ -49,7 +49,7 @@ from nerfstudio.utils.misc import torch_compile
 from nerfstudio.utils.rich_utils import CONSOLE
 from nerfstudio.utils.spherical_harmonics import RGB2SH, SH2RGB, num_sh_bases
 
-from sea_splatfacto.deepseecolor.models import BackscatterNetV2, AttenuateNetV3, AttenuateNetV4
+from sea_splatfacto.deepseecolor.models import BackscatterNetV2, AttenuateNetV3, AttenuateNetV4, ColorMLP
 from sea_splatfacto.deepseecolor.losses import (
     AttenuateLoss,
     DarkChannelPriorLossV3,
@@ -563,6 +563,20 @@ class SeaSplatfactoModelConfig(SplatfactoModelConfig):
     learning (gradients are nulled before this). Should be well into Phase 3
     so the frame-independent medium model converges first."""
 
+    # Model-dev idea 014: Color MLP bottleneck (SplatFacto-W inspired)
+    use_color_mlp: bool = False
+    """[idea-014] Replace direct Gaussian RGB with MLP-mediated colors.
+    Per-Gaussian features are mapped through a shared MLP to produce
+    pre-sigmoid RGB. The MLP has no depth input, structurally preventing
+    Gaussians from encoding depth-dependent water effects — those must
+    come from the medium model. Inspired by SplatFacto-W."""
+    color_mlp_feature_dim: int = 16
+    """[idea-014] Dimensionality of per-Gaussian appearance features."""
+    color_mlp_hidden_dim: int = 64
+    """[idea-014] Hidden layer width of the shared color MLP."""
+    color_mlp_num_layers: int = 2
+    """[idea-014] Number of hidden layers in the shared color MLP."""
+
 
 class SeaSplatfactoModel(SplatfactoModel):
     """_summary_
@@ -573,8 +587,34 @@ class SeaSplatfactoModel(SplatfactoModel):
 
     config: SeaSplatfactoModelConfig
 
+    @property
+    def features_dc(self):
+        """Override base property to route through color MLP when enabled."""
+        if self.config.use_color_mlp and self.color_mlp_module is not None:
+            return self.color_mlp_module(self.gauss_params["appearance_features"])
+        return self.gauss_params["features_dc"]
+
     def populate_modules(self):
         super().populate_modules()
+
+        # [idea-014] Color MLP bottleneck
+        self.color_mlp_module: Optional[ColorMLP] = None
+        if self.config.use_color_mlp:
+            num_points = self.gauss_params["means"].shape[0]
+            self.gauss_params["appearance_features"] = torch.nn.Parameter(
+                torch.zeros(
+                    num_points,
+                    self.config.color_mlp_feature_dim,
+                    device=self.device,
+                )
+            )
+            self.color_mlp_module = ColorMLP(
+                feature_dim=self.config.color_mlp_feature_dim,
+                hidden_dim=self.config.color_mlp_hidden_dim,
+                num_layers=self.config.color_mlp_num_layers,
+            )
+            # Freeze raw features_dc — MLP produces colors instead
+            self.gauss_params["features_dc"].requires_grad_(False)
 
         self.backscatter_model: Optional[BackscatterNetV2] = None
         self.attenuation_model: Optional[nn.Module] = None
@@ -919,6 +959,14 @@ class SeaSplatfactoModel(SplatfactoModel):
         )
         return cbs
 
+    def get_gaussian_param_groups(self) -> Dict[str, List[Parameter]]:
+        """Override to swap features_dc for appearance_features when MLP is active."""
+        groups = super().get_gaussian_param_groups()
+        if self.config.use_color_mlp:
+            # Replace features_dc with appearance_features in the same optimizer slot
+            groups["features_dc"] = [self.gauss_params["appearance_features"]]
+        return groups
+
     def get_param_groups(self) -> Dict[str, List[Parameter]]:
         """_summary_
 
@@ -926,6 +974,10 @@ class SeaSplatfactoModel(SplatfactoModel):
             Dict[str, List[Parameter]]: _description_
         """
         param_groups = super().get_param_groups()  # get base parameter groups
+
+        # [idea-014] Color MLP parameters
+        if self.config.use_color_mlp and self.color_mlp_module is not None:
+            param_groups["color_mlp"] = list(self.color_mlp_module.parameters())
 
         if self.config.do_seathru and self.backscatter_model is not None:
             param_groups["backscatter_model"] = list(
@@ -1836,8 +1888,12 @@ class SeaSplatfactoModel(SplatfactoModel):
                 params (keep features_dc/features_rest unfrozen).
                 Source: train.py line 189 -- freeze everything except colors.
         """
+        # Determine which params are "color" params (kept unfrozen when colors_only=True)
+        color_params = {"features_dc", "features_rest"}
+        if self.config.use_color_mlp:
+            color_params.add("appearance_features")
         for name, param in self.gauss_params.items():
-            if colors_only and name in ("features_dc", "features_rest"):
+            if colors_only and name in color_params:
                 param.requires_grad_(True)
             else:
                 param.requires_grad_(not freeze)

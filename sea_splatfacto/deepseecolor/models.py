@@ -197,6 +197,57 @@ class AttenuateNetV3(nn.Module):
         return attenuation
 
 
+class ColorMLP(nn.Module):
+    """Shared color MLP — maps per-Gaussian features to RGB (pre-sigmoid).
+
+    Creates a structural bottleneck that prevents Gaussians from
+    independently memorizing arbitrary depth-dependent colors. The MLP
+    has no depth input, so it cannot learn the depth-dependent color
+    transformation that water creates — that must come from the medium.
+
+    Inspired by SplatFacto-W's appearance MLP, adapted for underwater
+    decomposition: instead of separating per-image vs per-Gaussian
+    appearance, this separates depth-independent scene colors (MLP)
+    from depth-dependent water effects (medium model).
+
+    Args:
+        feature_dim: Per-Gaussian feature dimensionality.
+        hidden_dim: MLP hidden layer width.
+        num_layers: Number of hidden layers.
+    """
+
+    def __init__(
+        self,
+        feature_dim: int = 16,
+        hidden_dim: int = 64,
+        num_layers: int = 2,
+    ):
+        super().__init__()
+        layers: list[nn.Module] = []
+        in_dim = feature_dim
+        for _ in range(num_layers):
+            layers.append(nn.Linear(in_dim, hidden_dim))
+            layers.append(nn.ReLU())
+            in_dim = hidden_dim
+        layers.append(nn.Linear(hidden_dim, 3))
+        self.net = nn.Sequential(*layers)
+
+        # Zero-init final layer for stable training start
+        # (features start at zero → MLP output starts near zero → sigmoid(0) ≈ 0.5 gray)
+        nn.init.zeros_(self.net[-1].weight)
+        nn.init.zeros_(self.net[-1].bias)
+
+    def forward(self, features: torch.Tensor) -> torch.Tensor:
+        """Map features to pre-sigmoid RGB.
+
+        Args:
+            features: [N, feature_dim] per-Gaussian appearance features.
+        Returns:
+            [N, 3] pre-sigmoid RGB values.
+        """
+        return self.net(features)
+
+
 class AttenuateNetV4(nn.Module):
     """Depth-dependent attenuation model — idea 012.
 
