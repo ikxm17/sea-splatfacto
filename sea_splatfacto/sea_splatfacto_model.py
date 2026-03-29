@@ -443,6 +443,15 @@ class SeaSplatfactoModelConfig(SplatfactoModelConfig):
     1 = current alternating behavior. Higher values give the medium time to converge
     before Gaussians react (DeepSeeColor uses 500)."""
 
+    # Model-dev idea 015: Staged freeze training (DeepSeeColor-style)
+    staged_medium_only_steps: int = 0
+    """[idea-015] Extended medium-only training phase. When > 0, overrides the
+    normal warmup duration (medium_warmup_steps / early_medium_warmup_steps) with
+    this value. During this phase, ALL Gaussian gradients are nulled and
+    densification is skipped — only medium models train. This forces medium
+    activation because Gaussians cannot compete or bypass. Inspired by
+    DeepSeeColor's staged training approach. Typical values: 3000-5000."""
+
     # Model-dev idea 010: β_D minimum regularization
     use_beta_d_min_reg: bool = False
     """[idea-010] Penalize β_D values below per-channel minimums using a smooth
@@ -1989,11 +1998,13 @@ class SeaSplatfactoModel(SplatfactoModel):
             # Periodic Phase 3 updates are interleaved, not bursted — handled
             # in step_post_backward().
             # [idea-008] Use shorter warmup when early medium was active
-            warmup_target = (
-                self.config.early_medium_warmup_steps
-                if self.config.use_early_medium
-                else self.config.medium_warmup_steps
-            )
+            # [idea-015] Extended medium-only phase overrides normal warmup
+            if self.config.staged_medium_only_steps > 0:
+                warmup_target = self.config.staged_medium_only_steps
+            elif self.config.use_early_medium:
+                warmup_target = self.config.early_medium_warmup_steps
+            else:
+                warmup_target = self.config.medium_warmup_steps
             if self.warmup_counter >= warmup_target:
                 self.warmup_counter = 0
                 self._in_medium_burst = False
