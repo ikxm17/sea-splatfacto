@@ -589,19 +589,29 @@ class SeaSplatfactoModel(SplatfactoModel):
 
     @property
     def features_dc(self):
-        """Override base property to route through color MLP when enabled."""
+        """Override base property to route through color MLP when enabled.
+
+        When MLP is active, gauss_params["features_dc"] holds learned feature vectors
+        (N x feature_dim) instead of raw RGB. The MLP maps these to RGB (N x 3).
+        """
         if self.config.use_color_mlp and self.color_mlp_module is not None:
-            return self.color_mlp_module(self.gauss_params["appearance_features"])
+            return self.color_mlp_module(self.gauss_params["features_dc"])
         return self.gauss_params["features_dc"]
 
     def populate_modules(self):
         super().populate_modules()
 
         # [idea-014] Color MLP bottleneck
+        # Replace per-Gaussian RGB with learned features routed through a shared MLP.
+        # The MLP has no depth input, so Gaussians cannot encode depth-dependent color,
+        # forcing the medium model to handle water effects.
+        # IMPORTANT: We replace gauss_params["features_dc"] in-place (not add a new key)
+        # because gsplat densification requires a 1:1 mapping between gauss_params keys
+        # and optimizer entries.
         self.color_mlp_module: Optional[ColorMLP] = None
         if self.config.use_color_mlp:
             num_points = self.gauss_params["means"].shape[0]
-            self.gauss_params["appearance_features"] = torch.nn.Parameter(
+            self.gauss_params["features_dc"] = torch.nn.Parameter(
                 torch.zeros(
                     num_points,
                     self.config.color_mlp_feature_dim,
@@ -613,8 +623,6 @@ class SeaSplatfactoModel(SplatfactoModel):
                 hidden_dim=self.config.color_mlp_hidden_dim,
                 num_layers=self.config.color_mlp_num_layers,
             )
-            # Freeze raw features_dc — MLP produces colors instead
-            self.gauss_params["features_dc"].requires_grad_(False)
 
         self.backscatter_model: Optional[BackscatterNetV2] = None
         self.attenuation_model: Optional[nn.Module] = None
@@ -958,14 +966,6 @@ class SeaSplatfactoModel(SplatfactoModel):
             )
         )
         return cbs
-
-    def get_gaussian_param_groups(self) -> Dict[str, List[Parameter]]:
-        """Override to swap features_dc for appearance_features when MLP is active."""
-        groups = super().get_gaussian_param_groups()
-        if self.config.use_color_mlp:
-            # Replace features_dc with appearance_features in the same optimizer slot
-            groups["features_dc"] = [self.gauss_params["appearance_features"]]
-        return groups
 
     def get_param_groups(self) -> Dict[str, List[Parameter]]:
         """_summary_
@@ -1890,8 +1890,6 @@ class SeaSplatfactoModel(SplatfactoModel):
         """
         # Determine which params are "color" params (kept unfrozen when colors_only=True)
         color_params = {"features_dc", "features_rest"}
-        if self.config.use_color_mlp:
-            color_params.add("appearance_features")
         for name, param in self.gauss_params.items():
             if colors_only and name in color_params:
                 param.requires_grad_(True)
