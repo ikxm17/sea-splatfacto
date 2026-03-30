@@ -1295,6 +1295,33 @@ class SeaSplatfactoModel(SplatfactoModel):
             metrics_dict["exposure_abs_mean"] = exposures.abs().mean()
             metrics_dict["exposure_std"] = exposures.std()
 
+        # Decomposition activity metrics — continuous proxies for medium health
+        # Log in all phases: zeros in Phase 1 (baseline), real values in Phase 2/3
+        medium_rgb = outputs.get("medium_rgb")
+        clean_rgb = outputs.get("clean_rgb")
+        attenuation_map = outputs.get("attenuation_map")
+        backscatter = outputs.get("backscatter")
+
+        if self.seathru_active and medium_rgb is not None and clean_rgb is not None:
+            medium_mean = medium_rgb.detach().abs().mean().clamp(min=1e-8)
+            metrics_dict["medium_contribution"] = (
+                (medium_rgb.detach() - clean_rgb.detach()).abs().mean() / medium_mean
+            )
+        else:
+            metrics_dict["medium_contribution"] = torch.tensor(0.0)
+
+        if self.seathru_active and attenuation_map is not None:
+            metrics_dict["attenuation_magnitude"] = (
+                (1.0 - attenuation_map.detach()).abs().mean()
+            )
+        else:
+            metrics_dict["attenuation_magnitude"] = torch.tensor(0.0)
+
+        if self.seathru_active and backscatter is not None:
+            metrics_dict["backscatter_magnitude"] = backscatter.detach().abs().mean()
+        else:
+            metrics_dict["backscatter_magnitude"] = torch.tensor(0.0)
+
         return metrics_dict
 
     @torch.no_grad()
