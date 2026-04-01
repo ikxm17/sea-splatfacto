@@ -466,6 +466,21 @@ class SeaSplatfactoModelConfig(SplatfactoModelConfig):
     beta_d_min_b: float = 0.05
     """[idea-010] Minimum β_D for blue channel. Blue attenuates least."""
 
+    # Model-dev idea 016: β_B maximum regularization (RS triple-valve fix)
+    use_beta_b_max_reg: bool = False
+    """[idea-016] Penalize β_B values above per-channel maximums using a smooth
+    softplus penalty. Prevents the optimizer from inflating backscatter coefficients
+    when β_D and B_inf are both constrained (triple-valve pressure conservation).
+    Mirrors beta_d_min_reg (idea 010) with reversed direction."""
+    beta_b_max_reg_lambda: float = 0.1
+    """[idea-016] Weight for the β_B maximum regularization loss."""
+    beta_b_max_r: float = 2.0
+    """[idea-016] Maximum β_B for red channel. Physical range: 0.1–2.0 for typical seawater."""
+    beta_b_max_g: float = 2.0
+    """[idea-016] Maximum β_B for green channel."""
+    beta_b_max_b: float = 2.0
+    """[idea-016] Maximum β_B for blue channel."""
+
     # Model-dev idea 002: Phase 3 medium LR decay
     use_medium_lr_decay: bool = False
     """[idea-002] Decay medium model LR during Phase 3 joint training to prevent
@@ -1671,6 +1686,21 @@ class SeaSplatfactoModel(SplatfactoModel):
                 loss_dict["beta_d_min"] = (
                     self.config.beta_d_min_reg_lambda
                     * torch.nn.functional.softplus(beta_d_min - beta_d).mean()
+                )
+
+            # β_B maximum regularization — prevent backscatter coefficient inflation
+            # Addresses the triple-valve pressure conservation: when β_D and B_inf
+            # are both constrained, the optimizer inflates β_B as a pressure valve.
+            if self.config.use_beta_b_max_reg:
+                beta_b = self.backscatter_model.backscatter_conv_params.squeeze()
+                beta_b_max = torch.tensor(
+                    [self.config.beta_b_max_r, self.config.beta_b_max_g, self.config.beta_b_max_b],
+                    device=beta_b.device, dtype=beta_b.dtype,
+                )
+                # softplus(val - max): smooth penalty when val > max, ~0 when val < max
+                loss_dict["beta_b_max"] = (
+                    self.config.beta_b_max_reg_lambda
+                    * torch.nn.functional.softplus(beta_b - beta_b_max).mean()
                 )
 
             # [idea-012v01] Attenuation magnitude — prevent near-identity T(z)
