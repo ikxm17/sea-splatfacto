@@ -373,10 +373,10 @@ class SeaSplatfactoModelConfig(SplatfactoModelConfig):
     # Prevents Mode 4 bypass where V4 learns near-identity attenuation at 50K
     use_attn_magnitude_loss: bool = False
     """[idea-012v01] Penalize the attenuation map for being too close to identity
-    (all ones). Unlike beta_d_min (idea 010) which constrains parameter magnitude,
-    this constrains the *functional* attenuation effect: mean(1 - T(z)) >= floor.
-    This targets the integrated effect over actual scene depths, preventing
-    sophisticated depth-correlated near-identity bypass."""
+    (all ones). Constrains the *functional* attenuation effect (mean(1 - T(z))
+    >= floor) rather than per-channel parameter magnitude — targets the
+    integrated effect over actual scene depths, preventing sophisticated
+    depth-correlated near-identity bypass."""
     attn_magnitude_lambda: float = 0.5
     """[idea-012v01] Weight for attenuation magnitude loss."""
     attn_magnitude_floor: float = 0.1
