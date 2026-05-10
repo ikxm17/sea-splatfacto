@@ -404,26 +404,11 @@ class SeaSplatfactoModelConfig(SplatfactoModelConfig):
     activation because Gaussians cannot compete or bypass. Inspired by
     DeepSeeColor's staged training approach. Typical values: 3000-5000."""
 
-    # Model-dev idea 010: β_D minimum regularization
-    use_beta_d_min_reg: bool = False
-    """[idea-010] Penalize β_D values below per-channel minimums using a smooth
-    softplus penalty. Prevents the optimizer from collapsing attenuation to
-    near-identity, which is the root bypass mechanism for decomposition."""
-    beta_d_min_reg_lambda: float = 0.1
-    """[idea-010] Weight for the β_D minimum regularization loss."""
-    beta_d_min_r: float = 0.2
-    """[idea-010] Minimum β_D for red channel. Red attenuates fastest underwater."""
-    beta_d_min_g: float = 0.1
-    """[idea-010] Minimum β_D for green channel."""
-    beta_d_min_b: float = 0.05
-    """[idea-010] Minimum β_D for blue channel. Blue attenuates least."""
-
     # Model-dev idea 016: β_B maximum regularization (RS triple-valve fix)
     use_beta_b_max_reg: bool = False
     """[idea-016] Penalize β_B values above per-channel maximums using a smooth
     softplus penalty. Prevents the optimizer from inflating backscatter coefficients
-    when β_D and B_inf are both constrained (triple-valve pressure conservation).
-    Mirrors beta_d_min_reg (idea 010) with reversed direction."""
+    when β_D and B_inf are both constrained (triple-valve pressure conservation)."""
     beta_b_max_reg_lambda: float = 0.1
     """[idea-016] Weight for the β_B maximum regularization loss."""
     beta_b_max_r: float = 2.0
@@ -1271,20 +1256,6 @@ class SeaSplatfactoModel(SplatfactoModel):
                 loss_dict["binf"] = (
                     self.config.binf_loss_lambda
                     * self.backscatter_model.compute_binf_loss(clean_bchw.detach())
-                )
-
-            # β_D minimum regularization — prevent attenuation collapse to identity
-            # Only applies to V3 (scalar β_D); V4 uses depth-dependent params
-            if self.config.use_beta_d_min_reg and isinstance(self.attenuation_model, AttenuateNetV3):
-                beta_d = self.attenuation_model.attenuation_conv_params.squeeze()
-                beta_d_min = torch.tensor(
-                    [self.config.beta_d_min_r, self.config.beta_d_min_g, self.config.beta_d_min_b],
-                    device=beta_d.device, dtype=beta_d.dtype,
-                )
-                # softplus(min - val): smooth penalty when val < min, ~0 when val > min
-                loss_dict["beta_d_min"] = (
-                    self.config.beta_d_min_reg_lambda
-                    * torch.nn.functional.softplus(beta_d_min - beta_d).mean()
                 )
 
             # β_B maximum regularization — prevent backscatter coefficient inflation
