@@ -103,10 +103,6 @@ sea_splatfacto_method = MethodSpecification(
                 "optimizer": AdamOptimizerConfig(lr=1e-2, eps=1e-15),
                 "scheduler": None,
             },
-            "per_frame_appearance": {
-                "optimizer": AdamOptimizerConfig(lr=1e-3, eps=1e-15),
-                "scheduler": None,
-            },
             "color_mlp": {
                 "optimizer": AdamOptimizerConfig(lr=2e-3, eps=1e-15),
                 "scheduler": ExponentialDecaySchedulerConfig(

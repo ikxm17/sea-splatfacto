@@ -462,24 +462,6 @@ class SeaSplatfactoModelConfig(SplatfactoModelConfig):
     gw_anneal_steps: int = 15000
     """[idea-003] Number of steps over which to linearly anneal GW weight."""
 
-    # Model-dev idea 007: Per-frame appearance correction
-    use_per_frame_binf: bool = False
-    """[idea-007-A] Per-frame B_inf offset: adds a learned [N_frames, 3] offset
-    to the backscatter B_inf parameter in logit space (before sigmoid), allowing
-    per-frame water color variation. 3 learnable parameters per training frame.
-    At eval time, offset is zero (frame-independent baseline)."""
-
-    use_per_frame_exposure: bool = False
-    """[idea-007-B] Per-frame exposure/color scale: multiplicative correction
-    applied to the combined medium model output. Parameterized in log-space
-    so exp(0)=1 is the identity. 3 learnable parameters per training frame.
-    At eval time, scale is 1.0 (no correction)."""
-
-    per_frame_appearance_from_iter: int = 15000
-    """[idea-007] Iteration at which per-frame appearance parameters begin
-    learning (gradients are nulled before this). Should be well into Phase 3
-    so the frame-independent medium model converges first."""
-
     # Model-dev idea 014: Color MLP bottleneck (SplatFacto-W inspired)
     use_color_mlp: bool = False
     """[idea-014] Replace direct Gaussian RGB with MLP-mediated colors.
@@ -658,24 +640,6 @@ class SeaSplatfactoModel(SplatfactoModel):
         self._gs_frozen: bool = False
         self._phase3_onset_step: int = -1
 
-        # Per-frame appearance correction (idea 007)
-        if self.config.use_per_frame_binf:
-            self.per_frame_binf_offsets = torch.nn.Parameter(
-                torch.zeros(self.num_train_data, 3)
-            )
-            CONSOLE.log(
-                f"[INFO] Per-frame B_inf offsets: ({self.num_train_data}, 3), "
-                f"from_iter={self.config.per_frame_appearance_from_iter}"
-            )
-        if self.config.use_per_frame_exposure:
-            self.per_frame_exposure = torch.nn.Parameter(
-                torch.zeros(self.num_train_data, 3)
-            )
-            CONSOLE.log(
-                f"[INFO] Per-frame exposure scale: ({self.num_train_data}, 3), "
-                f"from_iter={self.config.per_frame_appearance_from_iter}"
-            )
-
         # Gradient magnitude tracking (recorded before nulling in step_post_backward)
         self._last_grad_bs: float = 0.0
         self._last_grad_at: float = 0.0
@@ -806,13 +770,6 @@ class SeaSplatfactoModel(SplatfactoModel):
                     for p in self.attenuation_model.parameters():
                         p.grad = None
 
-        # [idea-007] Null per-frame appearance gradients before activation
-        if step < self.config.per_frame_appearance_from_iter:
-            if self.config.use_per_frame_binf and hasattr(self, "per_frame_binf_offsets"):
-                self.per_frame_binf_offsets.grad = None
-            if self.config.use_per_frame_exposure and hasattr(self, "per_frame_exposure"):
-                self.per_frame_exposure.grad = None
-
         # Normal operation -- run Splatfacto's strategy (densification/pruning)
         super().step_post_backward(step)
 
@@ -859,15 +816,6 @@ class SeaSplatfactoModel(SplatfactoModel):
             )
         if self.config.learn_background:
             param_groups["learned_background"] = [self.learned_bg]
-
-        # Per-frame appearance parameters (idea 007)
-        per_frame_params = []
-        if self.config.use_per_frame_binf and hasattr(self, "per_frame_binf_offsets"):
-            per_frame_params.append(self.per_frame_binf_offsets)
-        if self.config.use_per_frame_exposure and hasattr(self, "per_frame_exposure"):
-            per_frame_params.append(self.per_frame_exposure)
-        if per_frame_params:
-            param_groups["per_frame_appearance"] = per_frame_params
 
         return param_groups
 
@@ -988,34 +936,12 @@ class SeaSplatfactoModel(SplatfactoModel):
                     1,
                 )
 
-            # [idea-007-A] Per-frame B_inf offset for water color correction
-            # Apply during both training AND eval when cam_idx is available.
-            # Novel views (no cam_idx) fall back to identity (offset=0).
-            binf_offset = None
-            if self.config.use_per_frame_binf and "cam_idx" in camera.metadata:
-                cam_idx = camera.metadata["cam_idx"]
-                binf_offset = self.per_frame_binf_offsets[cam_idx].reshape(3, 1, 1)
-
             # backscatter
-            backscatter_bchw = self.backscatter_model(
-                depth_bchw, binf_offset=binf_offset
-            )  # [1, 3, H, W]
-            backscatter_detach_bchw = self.backscatter_model(
-                depth_bchw.detach(), binf_offset=binf_offset
-            )
+            backscatter_bchw = self.backscatter_model(depth_bchw)  # [1, 3, H, W]
+            backscatter_detach_bchw = self.backscatter_model(depth_bchw.detach())
 
             # combined medium image (scene through water)
             medium_bchw = torch.clamp(direct_bchw + backscatter_bchw, 0.0, 1.0)
-
-            # [idea-007-B] Per-frame exposure/color correction
-            # Apply during both training AND eval when cam_idx is available.
-            # Novel views (no cam_idx) fall back to identity (scale=1).
-            if self.config.use_per_frame_exposure and "cam_idx" in camera.metadata:
-                cam_idx = camera.metadata["cam_idx"]
-                exposure_scale = torch.exp(
-                    self.per_frame_exposure[cam_idx]
-                ).reshape(1, 3, 1, 1)
-                medium_bchw = torch.clamp(medium_bchw * exposure_scale, 0.0, 1.0)
 
             # Store in outputs (HWC format)
             outputs["medium_rgb"] = self._to_hwc(medium_bchw)
@@ -1106,16 +1032,6 @@ class SeaSplatfactoModel(SplatfactoModel):
                 self.config.gw_anneal_start
                 + (self.config.gw_anneal_end - self.config.gw_anneal_start) * anneal_progress
             )
-
-        # [idea-007] Log per-frame appearance parameter statistics
-        if self.config.use_per_frame_binf and hasattr(self, "per_frame_binf_offsets"):
-            offsets = self.per_frame_binf_offsets.detach()
-            metrics_dict["binf_offset_abs_mean"] = offsets.abs().mean()
-            metrics_dict["binf_offset_std"] = offsets.std()
-        if self.config.use_per_frame_exposure and hasattr(self, "per_frame_exposure"):
-            exposures = self.per_frame_exposure.detach()
-            metrics_dict["exposure_abs_mean"] = exposures.abs().mean()
-            metrics_dict["exposure_std"] = exposures.std()
 
         # Decomposition activity metrics — continuous proxies for medium health
         # Log in all phases: zeros in Phase 1 (baseline), real values in Phase 2/3
