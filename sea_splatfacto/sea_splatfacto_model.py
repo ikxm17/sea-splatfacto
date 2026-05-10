@@ -385,15 +385,6 @@ class SeaSplatfactoModelConfig(SplatfactoModelConfig):
     the loss activates. Physical reference: saltpond depth range ~2-9m with moderate
     attenuation should produce 10-40% mean effect."""
 
-    # Model-dev idea 015: Staged freeze training (DeepSeeColor-style)
-    staged_medium_only_steps: int = 0
-    """[idea-015] Extended medium-only training phase. When > 0, overrides the
-    normal warmup duration (medium_warmup_steps / early_medium_warmup_steps) with
-    this value. During this phase, ALL Gaussian gradients are nulled and
-    densification is skipped — only medium models train. This forces medium
-    activation because Gaussians cannot compete or bypass. Inspired by
-    DeepSeeColor's staged training approach. Typical values: 3000-5000."""
-
     # Model-dev idea 016: β_B maximum regularization (RS triple-valve fix)
     use_beta_b_max_reg: bool = False
     """[idea-016] Penalize β_B values above per-channel maximums using a smooth
@@ -1430,32 +1421,6 @@ class SeaSplatfactoModel(SplatfactoModel):
 
         return d
 
-    def _freeze_gs_params(self, freeze: bool, colors_only: bool = False) -> None:
-        """Toggle ``requires_grad`` on Gaussian parameter groups.
-
-        Args:
-            freeze: If True, set requires_grad=False; else True.
-            colors_only: If True and freeze=True, only freeze non-color
-                params (keep features_dc/features_rest unfrozen).
-                Source: train.py line 189 -- freeze everything except colors.
-        """
-        # Determine which params are "color" params (kept unfrozen when colors_only=True)
-        color_params = {"features_dc", "features_rest"}
-        for name, param in self.gauss_params.items():
-            if colors_only and name in color_params:
-                param.requires_grad_(True)
-            else:
-                param.requires_grad_(not freeze)
-
-    def _freeze_medium_params(self, freeze: bool) -> None:
-        """Toggle ``requires_grad`` on medium model parameters."""
-        if self.backscatter_model is not None:
-            for p in self.backscatter_model.parameters():
-                p.requires_grad_(not freeze)
-        if self.attenuation_model is not None:
-            for p in self.attenuation_model.parameters():
-                p.requires_grad_(not freeze)
-
     # Callbacks
     def _seasplat_before_iteration(self, step: int) -> None:
         """BEFORE_TRAIN_ITERATION callback -- manage training phase state.
@@ -1539,13 +1504,11 @@ class SeaSplatfactoModel(SplatfactoModel):
             # Periodic Phase 3 updates are interleaved, not bursted — handled
             # in step_post_backward().
             # [idea-008] Use shorter warmup when early medium was active
-            # [idea-015] Extended medium-only phase overrides normal warmup
-            if self.config.staged_medium_only_steps > 0:
-                warmup_target = self.config.staged_medium_only_steps
-            elif self.config.use_early_medium:
-                warmup_target = self.config.early_medium_warmup_steps
-            else:
-                warmup_target = self.config.medium_warmup_steps
+            warmup_target = (
+                self.config.early_medium_warmup_steps
+                if self.config.use_early_medium
+                else self.config.medium_warmup_steps
+            )
             if self.warmup_counter >= warmup_target:
                 self.warmup_counter = 0
                 self._in_medium_burst = False
