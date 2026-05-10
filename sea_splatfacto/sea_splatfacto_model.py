@@ -385,16 +385,6 @@ class SeaSplatfactoModelConfig(SplatfactoModelConfig):
     the loss activates. Physical reference: saltpond depth range ~2-9m with moderate
     attenuation should produce 10-40% mean effect."""
 
-    # Model-dev idea 013: GS color stop-gradient during medium steps
-    use_gs_color_stop_gradient: bool = False
-    """[idea-013] Detach clean_rgb during medium update steps so Gaussians cannot
-    co-adapt while the medium is updating. Inspired by DeepSeeColor's .detach()
-    between stages."""
-    medium_window_size: int = 1
-    """[idea-013] Number of consecutive medium steps before switching to GS steps.
-    1 = current alternating behavior. Higher values give the medium time to converge
-    before Gaussians react (DeepSeeColor uses 500)."""
-
     # Model-dev idea 015: Staged freeze training (DeepSeeColor-style)
     staged_medium_only_steps: int = 0
     """[idea-015] Extended medium-only training phase. When > 0, overrides the
@@ -733,7 +723,6 @@ class SeaSplatfactoModel(SplatfactoModel):
         # Reference (train.py:434): medium optimizers step ONCE every
         # update_bs_at_interval iterations (with `continue` to skip GS).
         # On all other iterations, GS optimizer steps normally.
-        # [idea-013] medium_window_size > 1 runs consecutive medium steps per cycle.
         if self.seathru_active and self.medium_inited:
             if self._is_medium_step(step):
                 # Interleaved medium step: null GS + bg grads, medium updates
@@ -877,18 +866,6 @@ class SeaSplatfactoModel(SplatfactoModel):
             # convert to BCHW for medium models
             clean_bchw = self._to_bchw(clean_rgb)  # [1, 3, H, W]
             depth_bchw = self._to_bchw(depth_processed)  # [1, 1, H, W]
-
-            # [idea-013] Stop-gradient on Gaussian colors during medium steps
-            # Detach clean_bchw so medium receives full gradients but they don't
-            # flow back into Gaussian colors, preventing co-adaptation
-            if (
-                self.config.use_gs_color_stop_gradient
-                and self.training
-                and self.seathru_active
-                and self.medium_inited
-                and self._is_medium_step(self.step)
-            ):
-                clean_bchw = clean_bchw.detach()
 
             # attenuation
             if self.config.disable_attenuation:
@@ -1444,18 +1421,12 @@ class SeaSplatfactoModel(SplatfactoModel):
 
     # Helpers
     def _is_medium_step(self, step: int) -> bool:
-        """Check if the current step is a medium update step.
+        """Check whether the current step is a medium update step.
 
-        With medium_window_size=1 (default), this matches the existing behavior:
-        one medium step every medium_update_interval steps.
-
-        With medium_window_size=W, runs W consecutive medium steps in every
-        (medium_update_interval + W) cycle.
+        One medium step every medium_update_interval steps; GS steps on
+        all other iterations.
         """
-        window = self.config.medium_window_size
-        interval = self.config.medium_update_interval
-        cycle = interval + window - 1  # total cycle length
-        return (step % cycle) < window
+        return (step % self.config.medium_update_interval) == 0
 
     @staticmethod
     def _to_bchw(hwc: torch.Tensor) -> torch.Tensor:
