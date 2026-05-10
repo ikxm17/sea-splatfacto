@@ -345,8 +345,6 @@ class SeaSplatfactoModelConfig(SplatfactoModelConfig):
     backscatter_use_residual: bool = False
     """Include the residual J_prime * exp(-β_d * z) term in the backscatter
     model (equation 10 from SeaThru)."""
-    use_attenuation_v2: bool = False
-    """Use AttenuateNetV2 (drops some terms) instead of the default."""
     use_attenuation_v3: bool = True
     """Use AttenuateNetV3 (simplest) — the default attenuation model."""
     disable_attenuation: bool = False
