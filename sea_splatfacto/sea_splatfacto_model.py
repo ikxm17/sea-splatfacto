@@ -48,7 +48,7 @@ from nerfstudio.utils.misc import torch_compile
 from nerfstudio.utils.rich_utils import CONSOLE
 from nerfstudio.utils.spherical_harmonics import RGB2SH, SH2RGB, num_sh_bases
 
-from sea_splatfacto.deepseecolor.models import BackscatterNetV2, AttenuateNetV3, AttenuateNetV4, ColorMLP
+from sea_splatfacto.deepseecolor.models import BackscatterNetV2, AttenuateNetV3, AttenuateNetV4
 from sea_splatfacto.deepseecolor.losses import (
     AttenuateLoss,
     DarkChannelPriorLossV3,
@@ -437,19 +437,6 @@ class SeaSplatfactoModelConfig(SplatfactoModelConfig):
     gw_anneal_steps: int = 15000
     """[idea-003] Number of steps over which to linearly anneal GW weight."""
 
-    # Model-dev idea 014: Color MLP bottleneck (SplatFacto-W inspired)
-    use_color_mlp: bool = False
-    """[idea-014] Replace direct Gaussian RGB with MLP-mediated colors.
-    Per-Gaussian features are mapped through a shared MLP to produce
-    pre-sigmoid RGB. The MLP has no depth input, structurally preventing
-    Gaussians from encoding depth-dependent water effects — those must
-    come from the medium model. Inspired by SplatFacto-W."""
-    color_mlp_feature_dim: int = 16
-    """[idea-014] Dimensionality of per-Gaussian appearance features."""
-    color_mlp_hidden_dim: int = 64
-    """[idea-014] Hidden layer width of the shared color MLP."""
-    color_mlp_num_layers: int = 2
-    """[idea-014] Number of hidden layers in the shared color MLP."""
 
 
 class SeaSplatfactoModel(SplatfactoModel):
@@ -461,42 +448,8 @@ class SeaSplatfactoModel(SplatfactoModel):
 
     config: SeaSplatfactoModelConfig
 
-    @property
-    def features_dc(self):
-        """Override base property to route through color MLP when enabled.
-
-        When MLP is active, gauss_params["features_dc"] holds learned feature vectors
-        (N x feature_dim) instead of raw RGB. The MLP maps these to RGB (N x 3).
-        """
-        if self.config.use_color_mlp and self.color_mlp_module is not None:
-            return self.color_mlp_module(self.gauss_params["features_dc"])
-        return self.gauss_params["features_dc"]
-
     def populate_modules(self):
         super().populate_modules()
-
-        # [idea-014] Color MLP bottleneck
-        # Replace per-Gaussian RGB with learned features routed through a shared MLP.
-        # The MLP has no depth input, so Gaussians cannot encode depth-dependent color,
-        # forcing the medium model to handle water effects.
-        # IMPORTANT: We replace gauss_params["features_dc"] in-place (not add a new key)
-        # because gsplat densification requires a 1:1 mapping between gauss_params keys
-        # and optimizer entries.
-        self.color_mlp_module: Optional[ColorMLP] = None
-        if self.config.use_color_mlp:
-            num_points = self.gauss_params["means"].shape[0]
-            self.gauss_params["features_dc"] = torch.nn.Parameter(
-                torch.zeros(
-                    num_points,
-                    self.config.color_mlp_feature_dim,
-                    device=self.gauss_params["means"].device,
-                )
-            )
-            self.color_mlp_module = ColorMLP(
-                feature_dim=self.config.color_mlp_feature_dim,
-                hidden_dim=self.config.color_mlp_hidden_dim,
-                num_layers=self.config.color_mlp_num_layers,
-            )
 
         self.backscatter_model: Optional[BackscatterNetV2] = None
         self.attenuation_model: Optional[nn.Module] = None
@@ -775,10 +728,6 @@ class SeaSplatfactoModel(SplatfactoModel):
             Dict[str, List[Parameter]]: _description_
         """
         param_groups = super().get_param_groups()  # get base parameter groups
-
-        # [idea-014] Color MLP parameters
-        if self.config.use_color_mlp and self.color_mlp_module is not None:
-            param_groups["color_mlp"] = list(self.color_mlp_module.parameters())
 
         if self.config.do_seathru and self.backscatter_model is not None:
             param_groups["backscatter_model"] = list(
