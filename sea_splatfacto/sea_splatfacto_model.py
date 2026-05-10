@@ -492,14 +492,6 @@ class SeaSplatfactoModelConfig(SplatfactoModelConfig):
     medium_lr_decay_steps: int = 10000
     """[idea-002] Number of training steps over which to decay (from Phase 3 onset)."""
 
-    # Model-dev idea 001: Phase 1→2 transition smoothing (fade-in blending)
-    medium_fade_in_steps: int = 0
-    """[idea-001] Number of steps to linearly blend from raw Gaussian RGB to medium
-    output after SeaThru activation. 0 = disabled (abrupt switch, baseline behavior).
-    When enabled, the rendered output gradually transitions:
-      output = (1 - alpha) * raw_image + alpha * medium_image
-    where alpha ramps from 0 to 1 over medium_fade_in_steps steps."""
-
     # Model-dev idea 005: Marine snow modelling
     use_marine_snow: bool = False
     """[idea-005] Enable marine snow model. The observation model becomes
@@ -762,7 +754,6 @@ class SeaSplatfactoModel(SplatfactoModel):
         self._in_medium_burst: bool = False
         self._gs_frozen: bool = False
         self._phase3_onset_step: int = -1
-        self._phase2_onset_step: int = -1
 
         # Marine snow model (idea 005)
         if self.config.use_marine_snow:
@@ -1168,23 +1159,6 @@ class SeaSplatfactoModel(SplatfactoModel):
                     self.per_frame_exposure[cam_idx]
                 ).reshape(1, 3, 1, 1)
                 medium_bchw = torch.clamp(medium_bchw * exposure_scale, 0.0, 1.0)
-
-            # [idea-001] Fade-in blending: gradual transition from raw image to medium
-            if (
-                self.config.medium_fade_in_steps > 0
-                and self.training
-                and self._phase2_onset_step > 0
-            ):
-                fade_progress = min(
-                    (self.step - self._phase2_onset_step)
-                    / self.config.medium_fade_in_steps,
-                    1.0,
-                )
-                if fade_progress < 1.0:
-                    medium_bchw = (
-                        (1.0 - fade_progress) * clean_bchw
-                        + fade_progress * medium_bchw
-                    )
 
             # Store in outputs (HWC format)
             outputs["medium_rgb"] = self._to_hwc(medium_bchw)
@@ -2009,7 +1983,6 @@ class SeaSplatfactoModel(SplatfactoModel):
         if step > self.config.seathru_from_iter and not self.seathru_active:
             self.seathru_active = True
             self._gs_frozen = True
-            self._phase2_onset_step = step
             CONSOLE.log(
                 f"[INFO] [Step {step}] SeaThru activated; "
                 "GS frozen (except colors) for 1 iter"
