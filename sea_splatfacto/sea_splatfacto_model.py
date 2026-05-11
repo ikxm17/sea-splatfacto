@@ -353,11 +353,6 @@ class SeaSplatfactoModelConfig(SplatfactoModelConfig):
     max_amplification: float = 3.0
     """[idea-011-A] Maximum amplification factor 1/T(z). 3.0 means clean can be
     at most 3× brighter than direct. DeepSeeColor uses 3.0."""
-    use_variance_preservation: bool = False
-    """[idea-011-C] Penalize mismatch between clean and medium render spatial
-    variance. Detects Gaussian co-adaptation via spatial statistics divergence."""
-    var_preservation_lambda: float = 1.0
-    """[idea-011-C] Weight for variance preservation loss."""
     use_beta_d_ordering: bool = False
     """[idea-011-D] Enforce physical channel ordering β_D_R > β_D_G > β_D_B
     (red attenuates fastest underwater)."""
@@ -1138,16 +1133,6 @@ class SeaSplatfactoModel(SplatfactoModel):
                 loss_dict["binf"] = (
                     self.config.binf_loss_lambda
                     * self.backscatter_model.compute_binf_loss(clean_bchw.detach())
-                )
-
-            # [idea-011-C] Variance preservation — clean and medium spatial stats should match
-            if self.config.use_variance_preservation and "medium_rgb" in outputs:
-                medium_bchw = self._to_bchw(outputs["medium_rgb"])
-                clean_std = torch.std(clean_bchw, dim=[2, 3])
-                medium_std = torch.std(medium_bchw, dim=[2, 3])
-                loss_dict["var_preservation"] = (
-                    self.config.var_preservation_lambda
-                    * torch.nn.functional.mse_loss(clean_std, medium_std)
                 )
 
             # [idea-011-D] Channel ratio ordering — enforce β_D_R > β_D_G > β_D_B
