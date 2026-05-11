@@ -321,21 +321,6 @@ class SeaSplatfactoModelConfig(SplatfactoModelConfig):
     do_z_score: bool = False
     """Z-score filter the direct signal to ±3 standard deviations (clamps extreme values)."""
 
-    # Model-dev idea 009: Dataset-informed medium initialization
-    beta_d_init_r: float = 1.1
-    """[idea-009] Attenuation β_D red channel initialization. Higher = more red
-    absorption. Default 1.1 (reference init). Set from dataset color statistics."""
-    beta_d_init_g: float = 0.95
-    """[idea-009] Attenuation β_D green channel initialization."""
-    beta_d_init_b: float = 0.95
-    """[idea-009] Attenuation β_D blue channel initialization."""
-    beta_b_init_r: float = -1.0
-    """[idea-009] Backscatter β_B red channel initialization. -1 = random (default)."""
-    beta_b_init_g: float = -1.0
-    """[idea-009] Backscatter β_B green channel initialization. -1 = random."""
-    beta_b_init_b: float = -1.0
-    """[idea-009] Backscatter β_B blue channel initialization. -1 = random."""
-
     # Model-dev idea 011: Clean render output constraints (from DeepSeeColor analysis)
     use_amplification_clamp: bool = False
     """[idea-011-A] Hard-clamp exp(β_D·z) to a maximum, limiting how different
@@ -361,29 +346,11 @@ class SeaSplatfactoModel(SplatfactoModel):
         self.attenuation_model: Optional[nn.Module] = None
 
         if self.config.do_seathru:
-            # [idea-009] Dataset-informed initialization for medium models
-            beta_d_init = [
-                self.config.beta_d_init_r,
-                self.config.beta_d_init_g,
-                self.config.beta_d_init_b,
-            ]
-            # Use explicit init if any value differs from reference defaults
-            use_beta_d_init = beta_d_init != [1.1, 0.95, 0.95]
-
-            beta_b_vals = [
-                self.config.beta_b_init_r,
-                self.config.beta_b_init_g,
-                self.config.beta_b_init_b,
-            ]
-            # -1 sentinel means "use default behavior" (random init)
-            beta_b_init = beta_b_vals if all(v >= 0 for v in beta_b_vals) else None
-
             # Backscatter and attenuation models
             self.backscatter_model = BackscatterNetV2(
                 use_residual=self.config.backscatter_use_residual,
                 scale=self.config.backscatter_scale,
                 do_sigmoid=self.config.backscatter_do_sigmoid,
-                beta_b_init=beta_b_init,
             )
             max_amp = self.config.max_amplification if self.config.use_amplification_clamp else None
             if self.config.use_depth_dependent_beta_d:
@@ -397,20 +364,8 @@ class SeaSplatfactoModel(SplatfactoModel):
                 self.attenuation_model = AttenuateNetV3(
                     scale=self.config.attenuation_scale,
                     do_sigmoid=self.config.attenuation_do_sigmoid,
-                    init_vals=not self.config.attenuation_do_sigmoid and not use_beta_d_init,
-                    beta_d_init=beta_d_init if use_beta_d_init else None,
+                    init_vals=not self.config.attenuation_do_sigmoid,
                     max_amplification=max_amp,
-                )
-
-            # [idea-009] Log medium initialization
-            from nerfstudio.utils.rich_utils import CONSOLE as _C
-            if use_beta_d_init:
-                _C.log(
-                    f"[INFO] [idea-009] β_D initialized from config: {beta_d_init}"
-                )
-            if beta_b_init is not None:
-                _C.log(
-                    f"[INFO] [idea-009] β_B initialized from config: {beta_b_init}"
                 )
 
         # Learn background
