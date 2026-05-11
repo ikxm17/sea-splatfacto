@@ -1202,7 +1202,8 @@ class SeaSplatfactoModel(SplatfactoModel):
                 self.warmup_counter = 0
                 self._in_medium_burst = False
                 CONSOLE.log(
-                    f"[INFO] [Step {step}] Medium warm-up complete ({warmup_target} steps)"
+                    f"[INFO] [Step {step}] Medium warm-up complete "
+                    f"({self.config.medium_warmup_steps} steps)"
                 )
                 self.medium_inited = True
                 self.adjust_gs_colors_for_color_correction = True
@@ -1220,9 +1221,8 @@ class SeaSplatfactoModel(SplatfactoModel):
             else:
                 self.gs_color_correction_counter += 1
 
-        else:
-            # Phase 3: joint training — interleaved medium steps handled
-            # in step_post_backward() (1 medium step every
-            # medium_update_interval iterations, matching reference
-            # train.py:434).
+        # Phase 3: joint training — interleaved medium steps handled
+        # in step_post_backward() (1 medium step every
+        # medium_update_interval iterations, matching reference
+        # train.py:434). No bookkeeping required here.
 
