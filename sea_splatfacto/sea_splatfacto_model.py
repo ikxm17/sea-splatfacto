@@ -353,12 +353,6 @@ class SeaSplatfactoModelConfig(SplatfactoModelConfig):
     max_amplification: float = 3.0
     """[idea-011-A] Maximum amplification factor 1/T(z). 3.0 means clean can be
     at most 3× brighter than direct. DeepSeeColor uses 3.0."""
-    use_beta_d_ordering: bool = False
-    """[idea-011-D] Enforce physical channel ordering β_D_R > β_D_G > β_D_B
-    (red attenuates fastest underwater)."""
-    beta_d_ordering_lambda: float = 0.1
-    """[idea-011-D] Weight for channel ordering loss."""
-
     # Model-dev idea 002: Phase 3 medium LR decay
     use_medium_lr_decay: bool = False
     """[idea-002] Decay medium model LR during Phase 3 joint training to prevent
@@ -1133,17 +1127,6 @@ class SeaSplatfactoModel(SplatfactoModel):
                 loss_dict["binf"] = (
                     self.config.binf_loss_lambda
                     * self.backscatter_model.compute_binf_loss(clean_bchw.detach())
-                )
-
-            # [idea-011-D] Channel ratio ordering — enforce β_D_R > β_D_G > β_D_B
-            # Only applies to V3 (scalar β_D); V4 ordering is implicit in double exponential
-            if self.config.use_beta_d_ordering and isinstance(self.attenuation_model, AttenuateNetV3):
-                beta_d = self.attenuation_model.attenuation_conv_params.squeeze()
-                # Penalize when green >= red or blue >= green
-                loss_dict["beta_d_ordering"] = (
-                    self.config.beta_d_ordering_lambda
-                    * (torch.relu(beta_d[1] / beta_d[0].clamp(min=1e-8) - 1.0)
-                       + torch.relu(beta_d[2] / beta_d[1].clamp(min=1e-8) - 1.0))
                 )
 
             # DSC attenuation loss
