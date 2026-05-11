@@ -48,7 +48,7 @@ from nerfstudio.utils.misc import torch_compile
 from nerfstudio.utils.rich_utils import CONSOLE
 from nerfstudio.utils.spherical_harmonics import RGB2SH, SH2RGB, num_sh_bases
 
-from sea_splatfacto.deepseecolor.models import BackscatterNetV2, AttenuateNetV3, AttenuateNetV4
+from sea_splatfacto.deepseecolor.models import BackscatterNetV2, AttenuateNetV3
 from sea_splatfacto.deepseecolor.losses import (
     AttenuateLoss,
     DarkChannelPriorLossV3,
@@ -303,10 +303,6 @@ class SeaSplatfactoModelConfig(SplatfactoModelConfig):
     """Use AttenuateNetV3 (simplest) — the default attenuation model."""
     disable_attenuation: bool = False
     """Simplified model that only accounts for backscatter (no attenuation)."""
-    use_depth_dependent_beta_d: bool = False
-    """[idea-012] Use AttenuateNetV4 with depth-varying attenuation rate
-    (double exponential: beta_d(z) = w*exp(-v*z) + y*exp(-x*z), 12 params).
-    Structurally prevents spatially uniform beta_D that defeated ideas 010/011."""
     medium_update_interval: int = 100
     """Interleaved medium step frequency: every this many iterations during
     Phase 3 joint training, one step updates medium models while GS is
@@ -345,18 +341,11 @@ class SeaSplatfactoModel(SplatfactoModel):
                 scale=self.config.backscatter_scale,
                 do_sigmoid=self.config.backscatter_do_sigmoid,
             )
-            if self.config.use_depth_dependent_beta_d:
-                # [idea-012] Depth-dependent beta_D (double exponential, 12 params)
-                self.attenuation_model = AttenuateNetV4(
-                    scale=self.config.attenuation_scale,
-                    do_sigmoid=self.config.attenuation_do_sigmoid,
-                )
-            else:
-                self.attenuation_model = AttenuateNetV3(
-                    scale=self.config.attenuation_scale,
-                    do_sigmoid=self.config.attenuation_do_sigmoid,
-                    init_vals=not self.config.attenuation_do_sigmoid,
-                )
+            self.attenuation_model = AttenuateNetV3(
+                scale=self.config.attenuation_scale,
+                do_sigmoid=self.config.attenuation_do_sigmoid,
+                init_vals=not self.config.attenuation_do_sigmoid,
+            )
 
         # Learn background
         if self.config.learn_background:
@@ -691,21 +680,10 @@ class SeaSplatfactoModel(SplatfactoModel):
             metrics_dict["bs_beta_b"] = bs_beta[2]
 
         if self.attenuation_model is not None and self.seathru_active:
-            if isinstance(self.attenuation_model, AttenuateNetV3):
-                # V3: scalar beta_D per channel
-                at_beta = self.attenuation_model.attenuation_conv_params.detach().squeeze()
-                metrics_dict["at_beta_r"] = at_beta[0]
-                metrics_dict["at_beta_g"] = at_beta[1]
-                metrics_dict["at_beta_b"] = at_beta[2]
-            elif isinstance(self.attenuation_model, AttenuateNetV4):
-                # V4: log effective beta_d at reference depth z=1.0
-                with torch.no_grad():
-                    z_ref = torch.ones(1, 1, 1, 1, device=self.device)
-                    t_ref = self.attenuation_model(z_ref).squeeze()  # [3]
-                    beta_eff = -torch.log(t_ref.clamp(min=1e-8))  # effective β_D*z at z=1
-                    metrics_dict["at_beta_eff_r"] = beta_eff[0]
-                    metrics_dict["at_beta_eff_g"] = beta_eff[1]
-                    metrics_dict["at_beta_eff_b"] = beta_eff[2]
+            at_beta = self.attenuation_model.attenuation_conv_params.detach().squeeze()
+            metrics_dict["at_beta_r"] = at_beta[0]
+            metrics_dict["at_beta_g"] = at_beta[1]
+            metrics_dict["at_beta_b"] = at_beta[2]
 
         # Gradient diagnostics: use pre-recorded values from step_post_backward
         # (recorded BEFORE gradient nulling, so they reflect actual gradient flow)
