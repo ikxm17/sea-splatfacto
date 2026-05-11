@@ -321,16 +321,6 @@ class SeaSplatfactoModelConfig(SplatfactoModelConfig):
     do_z_score: bool = False
     """Z-score filter the direct signal to ±3 standard deviations (clamps extreme values)."""
 
-    # Model-dev idea 008: Early medium conditioning
-    use_early_medium: bool = False
-    """[idea-008] Put the medium model in the rendering path during Phase 1
-    with FROZEN parameters. Forces Gaussians to learn colors that, when
-    transformed by the medium, reproduce the underwater GT image. Prevents
-    Gaussian entrenchment (memorizing underwater colors directly)."""
-    early_medium_warmup_steps: int = 200
-    """[idea-008] Shortened Phase 2a warm-up when early medium is active.
-    The medium doesn't need to 'catch up' since it was present from step 0."""
-
     # Model-dev idea 009: Dataset-informed medium initialization
     beta_d_init_r: float = 1.1
     """[idea-009] Attenuation β_D red channel initialization. Higher = more red
@@ -423,32 +413,6 @@ class SeaSplatfactoModel(SplatfactoModel):
                     f"[INFO] [idea-009] β_B initialized from config: {beta_b_init}"
                 )
 
-            # [idea-008] Initialize B_inf from bg_init values (not random) when
-            # early medium is enabled. The frozen medium needs physically
-            # plausible parameters — random B_inf injects garbage during Phase 1.
-            if self.config.use_early_medium and self.config.learn_background:
-                bg_init_logit = torch.log(
-                    torch.tensor([
-                        self.config.bg_init_r,
-                        self.config.bg_init_g,
-                        self.config.bg_init_b,
-                    ]).clamp(1e-6, 1 - 1e-6)
-                    / (1 - torch.tensor([
-                        self.config.bg_init_r,
-                        self.config.bg_init_g,
-                        self.config.bg_init_b,
-                    ]).clamp(1e-6, 1 - 1e-6))
-                )
-                with torch.no_grad():
-                    self.backscatter_model.B_inf.data.copy_(
-                        bg_init_logit.reshape(3, 1, 1)
-                    )
-                _C.log(
-                    f"[INFO] [idea-008] B_inf initialized from bg_init = "
-                    f"[{self.config.bg_init_r}, {self.config.bg_init_g}, {self.config.bg_init_b}] "
-                    f"(logit: {bg_init_logit.tolist()})"
-                )
-
         # Learn background
         if self.config.learn_background:
             bg_init = torch.tensor([
@@ -492,13 +456,6 @@ class SeaSplatfactoModel(SplatfactoModel):
             f"seathru_from_iter: {self.config.seathru_from_iter}, "
             f"disable_attenuation: {self.config.disable_attenuation}"
         )
-        if self.config.use_early_medium:
-            CONSOLE.log(
-                f"[INFO] [idea-008] Early medium conditioning ENABLED. "
-                f"Medium in rendering path from step 0 (frozen). "
-                f"Phase 2a warmup: {self.config.early_medium_warmup_steps} steps."
-            )
-
     def step_post_backward(self, step: int) -> None:
         """After backward: null out gradients for groups that should NOT be
         updated this step, then conditionally run Splatfacto's densification.
@@ -529,20 +486,6 @@ class SeaSplatfactoModel(SplatfactoModel):
                 p.grad.abs().mean().item() for p in self.attenuation_model.parameters()
                 if p.grad is not None
             )
-
-        # [idea-008] Early medium phase: medium is in the rendering path but
-        # FROZEN. Null medium gradients so only Gaussians update. Gaussians
-        # receive gradients through the frozen medium (differentiable transform).
-        if self.config.use_early_medium and not self.seathru_active:
-            if self.backscatter_model is not None:
-                for p in self.backscatter_model.parameters():
-                    p.grad = None
-            if self.attenuation_model is not None:
-                for p in self.attenuation_model.parameters():
-                    p.grad = None
-            # Continue to densification (Gaussians still update normally)
-            super().step_post_backward(step)
-            return
 
         if self._in_medium_burst:
             # Medium-only: null out GS and learned_bg gradients
@@ -678,25 +621,15 @@ class SeaSplatfactoModel(SplatfactoModel):
         depth_raw = outputs["depth"]  # [H, W, 1] or None
 
         # Learned background compositing
-        # [idea-008] Early medium: put medium in the rendering path during Phase 1
-        # with frozen parameters. Gaussians learn through the medium transform.
-        early_medium_phase = (
-            self.config.use_early_medium
-            and self.config.do_seathru
-            and self.backscatter_model is not None
-            and self.attenuation_model is not None
-            and self.training
-            and not self.seathru_active
-        )
         seathru_forward = (
             self.config.do_seathru
             and self.backscatter_model is not None
             and self.attenuation_model is not None
-            and (self.seathru_active or not self.training or early_medium_phase)
+            and (self.seathru_active or not self.training)
         )
 
         if self.config.learn_background:
-            if self.config.bg_from_backscatter and seathru_forward and not early_medium_phase:
+            if self.config.bg_from_backscatter and seathru_forward:
                 clean_rgb = rendered_image  # after SeaThru activates, stop adding learned_bg, the backscatter model fills in the water color
             else:
                 bg_color = torch.sigmoid(self.learned_bg)  # [3]
@@ -780,11 +713,6 @@ class SeaSplatfactoModel(SplatfactoModel):
             outputs["attenuation_depth_detached"] = self._to_hwc(
                 attenuation_map_detach_bchw
             )
-            # [idea-008] Flag so loss dict knows to skip medium-specific losses
-            # during early medium phase (medium is frozen, can't respond to losses)
-            if early_medium_phase:
-                outputs["early_medium_phase"] = True
-
         return outputs
 
     def get_metrics_dict(self, outputs, batch) -> Dict[str, torch.Tensor]:
@@ -891,7 +819,6 @@ class SeaSplatfactoModel(SplatfactoModel):
             Dict[str, torch.Tensor]: _description_
         """
         seathru_forward = "medium_rgb" in outputs
-        early_medium = outputs.get("early_medium_phase", False)
 
         modified_outputs = dict(outputs)
         if seathru_forward:
@@ -943,7 +870,7 @@ class SeaSplatfactoModel(SplatfactoModel):
                 alpha_chw,
             )
 
-            if seathru_forward and not early_medium:
+            if seathru_forward:
                 medium_chw = outputs["medium_rgb"].permute(2, 0, 1)
                 b_inf_sigmoid = torch.sigmoid(self.backscatter_model.B_inf.detach())
 
@@ -1046,7 +973,7 @@ class SeaSplatfactoModel(SplatfactoModel):
         # SeaThru losses requiring active (unfrozen) medium — gradients flow
         # to medium model parameters (backscatter, attenuation, B_inf).
         # Gated off during early medium Phase 1 because medium is frozen.
-        if seathru_forward and not early_medium:
+        if seathru_forward:
             backscatter_detach_bchw = self._to_bchw(
                 outputs["backscatter_depth_detached"]
             )
@@ -1348,13 +1275,7 @@ class SeaSplatfactoModel(SplatfactoModel):
             # Initial warm-up burst only (1000 consecutive medium-only steps).
             # Periodic Phase 3 updates are interleaved, not bursted — handled
             # in step_post_backward().
-            # [idea-008] Use shorter warmup when early medium was active
-            warmup_target = (
-                self.config.early_medium_warmup_steps
-                if self.config.use_early_medium
-                else self.config.medium_warmup_steps
-            )
-            if self.warmup_counter >= warmup_target:
+            if self.warmup_counter >= self.config.medium_warmup_steps:
                 self.warmup_counter = 0
                 self._in_medium_burst = False
                 CONSOLE.log(
