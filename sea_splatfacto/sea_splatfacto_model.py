@@ -353,11 +353,6 @@ class SeaSplatfactoModelConfig(SplatfactoModelConfig):
     max_amplification: float = 3.0
     """[idea-011-A] Maximum amplification factor 1/T(z). 3.0 means clean can be
     at most 3× brighter than direct. DeepSeeColor uses 3.0."""
-    use_clean_saturation_loss: bool = False
-    """[idea-011-B] Penalize clean_rgb values outside [0, 1]. Prevents blown-out
-    clean renders from Gaussian color compensation."""
-    clean_sat_lambda: float = 1.0
-    """[idea-011-B] Weight for clean render saturation loss."""
     use_variance_preservation: bool = False
     """[idea-011-C] Penalize mismatch between clean and medium render spatial
     variance. Detects Gaussian co-adaptation via spatial statistics divergence."""
@@ -1143,13 +1138,6 @@ class SeaSplatfactoModel(SplatfactoModel):
                 loss_dict["binf"] = (
                     self.config.binf_loss_lambda
                     * self.backscatter_model.compute_binf_loss(clean_bchw.detach())
-                )
-
-            # [idea-011-B] Clean render saturation — penalize clean_rgb outside [0, 1]
-            if self.config.use_clean_saturation_loss:
-                loss_dict["clean_sat"] = (
-                    self.config.clean_sat_lambda
-                    * (torch.relu(-clean_bchw) + torch.relu(clean_bchw - 1.0)).square().mean()
                 )
 
             # [idea-011-C] Variance preservation — clean and medium spatial stats should match
