@@ -353,22 +353,6 @@ class SeaSplatfactoModelConfig(SplatfactoModelConfig):
     max_amplification: float = 3.0
     """[idea-011-A] Maximum amplification factor 1/T(z). 3.0 means clean can be
     at most 3× brighter than direct. DeepSeeColor uses 3.0."""
-    # Model-dev idea 003: GW loss annealing
-    use_gw_anneal: bool = False
-    """[idea-003] Anneal gw_loss_lambda from gw_anneal_start to gw_anneal_end over
-    gw_anneal_steps, starting at gw_from_iter. Strong early GW establishes color
-    correction; late relaxation prevents PSNR regression from GW-reconstruction
-    conflict in Phase 3."""
-
-    gw_anneal_start: float = 0.30
-    """[idea-003] Initial GW weight at gw_from_iter (color-establishing phase)."""
-
-    gw_anneal_end: float = 0.05
-    """[idea-003] Final GW weight after annealing completes (fine-tuning phase)."""
-
-    gw_anneal_steps: int = 15000
-    """[idea-003] Number of steps over which to linearly anneal GW weight."""
-
 
 
 class SeaSplatfactoModel(SplatfactoModel):
@@ -864,17 +848,6 @@ class SeaSplatfactoModel(SplatfactoModel):
             metrics_dict["clean_mean_g"] = clean_means[1]
             metrics_dict["clean_mean_b"] = clean_means[2]
 
-        # [idea-003] Log effective GW weight when annealing
-        if self.config.use_gw_anneal and self.step > self.config.gw_from_iter:
-            anneal_progress = min(
-                (self.step - self.config.gw_from_iter) / max(self.config.gw_anneal_steps, 1),
-                1.0,
-            )
-            metrics_dict["gw_weight_eff"] = (
-                self.config.gw_anneal_start
-                + (self.config.gw_anneal_end - self.config.gw_anneal_start) * anneal_progress
-            )
-
         # Decomposition activity metrics — continuous proxies for medium health
         # Log in all phases: zeros in Phase 1 (baseline), real values in Phase 2/3
         medium_rgb = outputs.get("medium_rgb")
@@ -1058,20 +1031,7 @@ class SeaSplatfactoModel(SplatfactoModel):
                 # Flatten to [1, C, N] for the criterion
                 gray_world_input = gray_world_input[:, :, mask]
 
-            # [idea-003] Compute effective GW weight (constant or annealed)
-            if self.config.use_gw_anneal:
-                anneal_progress = min(
-                    (step - self.config.gw_from_iter) / max(self.config.gw_anneal_steps, 1),
-                    1.0,
-                )
-                gw_weight = (
-                    self.config.gw_anneal_start
-                    + (self.config.gw_anneal_end - self.config.gw_anneal_start) * anneal_progress
-                )
-            else:
-                gw_weight = self.config.gw_loss_lambda
-
-            loss_dict["gray_world"] = gw_weight * self.gw_criterion(
+            loss_dict["gray_world"] = self.config.gw_loss_lambda * self.gw_criterion(
                 gray_world_input
             )
 
