@@ -321,13 +321,6 @@ class SeaSplatfactoModelConfig(SplatfactoModelConfig):
     do_z_score: bool = False
     """Z-score filter the direct signal to ±3 standard deviations (clamps extreme values)."""
 
-    # Model-dev idea 011: Clean render output constraints (from DeepSeeColor analysis)
-    use_amplification_clamp: bool = False
-    """[idea-011-A] Hard-clamp exp(β_D·z) to a maximum, limiting how different
-    clean_rgb can be from the direct signal. From DeepSeeColor's proven design."""
-    max_amplification: float = 3.0
-    """[idea-011-A] Maximum amplification factor 1/T(z). 3.0 means clean can be
-    at most 3× brighter than direct. DeepSeeColor uses 3.0."""
 
 
 class SeaSplatfactoModel(SplatfactoModel):
@@ -352,20 +345,17 @@ class SeaSplatfactoModel(SplatfactoModel):
                 scale=self.config.backscatter_scale,
                 do_sigmoid=self.config.backscatter_do_sigmoid,
             )
-            max_amp = self.config.max_amplification if self.config.use_amplification_clamp else None
             if self.config.use_depth_dependent_beta_d:
                 # [idea-012] Depth-dependent beta_D (double exponential, 12 params)
                 self.attenuation_model = AttenuateNetV4(
                     scale=self.config.attenuation_scale,
                     do_sigmoid=self.config.attenuation_do_sigmoid,
-                    max_amplification=max_amp,
                 )
             else:
                 self.attenuation_model = AttenuateNetV3(
                     scale=self.config.attenuation_scale,
                     do_sigmoid=self.config.attenuation_do_sigmoid,
                     init_vals=not self.config.attenuation_do_sigmoid,
-                    max_amplification=max_amp,
                 )
 
         # Learn background
