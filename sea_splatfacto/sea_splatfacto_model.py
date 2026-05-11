@@ -369,22 +369,6 @@ class SeaSplatfactoModelConfig(SplatfactoModelConfig):
     beta_d_ordering_lambda: float = 0.1
     """[idea-011-D] Weight for channel ordering loss."""
 
-    # Model-dev idea 012v01: Attenuation magnitude regularization
-    # Prevents Mode 4 bypass where V4 learns near-identity attenuation at 50K
-    use_attn_magnitude_loss: bool = False
-    """[idea-012v01] Penalize the attenuation map for being too close to identity
-    (all ones). Constrains the *functional* attenuation effect (mean(1 - T(z))
-    >= floor) rather than per-channel parameter magnitude — targets the
-    integrated effect over actual scene depths, preventing sophisticated
-    depth-correlated near-identity bypass."""
-    attn_magnitude_lambda: float = 0.5
-    """[idea-012v01] Weight for attenuation magnitude loss."""
-    attn_magnitude_floor: float = 0.1
-    """[idea-012v01] Minimum mean attenuation effect. 0.1 means: on average across
-    the image, at least 10% of light should be attenuated. If mean(1-T(z)) < floor,
-    the loss activates. Physical reference: saltpond depth range ~2-9m with moderate
-    attenuation should produce 10-40% mean effect."""
-
     # Model-dev idea 002: Phase 3 medium LR decay
     use_medium_lr_decay: bool = False
     """[idea-002] Decay medium model LR during Phase 3 joint training to prevent
@@ -1159,18 +1143,6 @@ class SeaSplatfactoModel(SplatfactoModel):
                 loss_dict["binf"] = (
                     self.config.binf_loss_lambda
                     * self.backscatter_model.compute_binf_loss(clean_bchw.detach())
-                )
-
-            # [idea-012v01] Attenuation magnitude — prevent near-identity T(z)
-            if self.config.use_attn_magnitude_loss and "attenuation_map" in outputs:
-                attn_map = self._to_bchw(outputs["attenuation_map"])
-                # Mean attenuation effect: how much light is actually attenuated
-                # T(z) near 1.0 means no attenuation; (1 - T(z)) measures the effect
-                attn_effect = (1.0 - attn_map).mean()
-                # Penalize when the mean effect is below the floor
-                loss_dict["attn_magnitude"] = (
-                    self.config.attn_magnitude_lambda
-                    * torch.relu(self.config.attn_magnitude_floor - attn_effect)
                 )
 
             # [idea-011-B] Clean render saturation — penalize clean_rgb outside [0, 1]
